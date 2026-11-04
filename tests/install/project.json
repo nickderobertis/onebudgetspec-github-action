@@ -12,6 +12,12 @@
       "options": {
         "command": "bash tests/install/smoke.sh"
       }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "shellcheck tests/install/smoke.sh"
+      }
     }
   }
 }

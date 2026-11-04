@@ -32,5 +32,5 @@ done
 # The release contract suite drives the installed public CLI in an isolated home.
 command -v onevcs >/dev/null 2>&1 || run uv tool install onevcs-cli==0.57.4
 
-run bash scripts/setup-llmlint.sh
+just setup-llmlint
 command -v llmlint >/dev/null 2>&1 || { echo "bootstrap: llmlint unavailable; fix setup-llmlint output and retry." >&2; exit 1; }

@@ -6,7 +6,6 @@
 #
 # No-op in CI, which provisions itself. Never blocks session startup: no `set -e`, and
 # it always exits 0. Silent on success; each problem is logged with what to do.
-# the SessionStart hook invokes it.
 set -uo pipefail
 
 readonly JUST_MIN="1.51.0"

@@ -105,3 +105,34 @@ fn help_version_and_rejection_perform_no_work() {
     }
     assert_eq!(std::fs::read_dir(dir.path()).expect("directory").count(), 0);
 }
+
+#[cfg(unix)]
+#[test]
+fn output_errors_fail_without_panicking() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::process::{Command, Stdio};
+    // A closed peer fails writes on both Linux and macOS, unlike /dev/full.
+    // The child still runs the real instrumented binary in this test's profile.
+    let broken_output = || {
+        let (writer, reader) = UnixStream::pair().expect("output socket pair");
+        drop(reader);
+        Stdio::from(OwnedFd::from(writer))
+    };
+    for args in [vec!["--help"], vec!["--version"]] {
+        let output = Command::new(binary())
+            .args(args)
+            .stdout(broken_output())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("real binary");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("error: output failed:"));
+    }
+    let status = Command::new(binary())
+        .arg("--unsupported")
+        .stderr(broken_output())
+        .status()
+        .expect("real binary");
+    assert_eq!(status.code(), Some(1));
+}

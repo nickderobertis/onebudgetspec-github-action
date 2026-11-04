@@ -25,7 +25,6 @@
       "Bash(just session-setup)",
       "Bash(just lint-llm:*)",
       "Bash(just lint-llm-diff:*)",
-      "Bash(llmlint:*)",
       "Bash(uv lock --upgrade --dry-run)",
       "Bash(cargo update --dry-run)",
       "Bash(bun outdated)",
@@ -36,7 +35,8 @@
       "Bash(git diff:*)",
       "Bash(git log:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(just lint-llm-validate:*)"
     ],
     "deny": []
   }

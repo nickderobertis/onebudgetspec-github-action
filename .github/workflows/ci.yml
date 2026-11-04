@@ -78,7 +78,7 @@ jobs:
       - run: just bootstrap
       - run: just check all
 
-  # The end-user install path on every platform (crates/onebudgetspec-github-action-install/smoke.sh).
+  # The end-user install path on every platform (tests/install/smoke.sh).
   install:
     name: install (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -139,7 +139,6 @@ jobs:
     needs: [gate, check-all, install, supply-chain, msrv]
     runs-on: ubuntu-latest
     steps:
-      # Exactly one of gate and check-all runs; every other job must succeed.
       - name: Every gate job succeeded
         env:
           GATE: ${{ needs.gate.result }}

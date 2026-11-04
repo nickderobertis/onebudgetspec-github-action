@@ -27,9 +27,7 @@ plugin; direct tool installation remains supported.
 
 ## Workflow and invariants
 
-Use just recipes and their Nx graph. Bootstrap installs the locked toolchain;
-check runs the affected deterministic gate, check all the broader sweep.
-Formatting, clippy and docs deny warnings; coverage enforces 95% lines.
+Use just recipes and their Nx graph.
 Tests drive real binaries, packaged installation and the real onevcs CLI;
 only the external crates.io boundary is stubbed. Cover success and failure.
 Validate boundary inputs, keep public contracts intentional and backward compatible,
