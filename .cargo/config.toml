@@ -1,0 +1,18 @@
+# Build configuration every cargo invocation anywhere inside this clone reads.
+#
+# `target-dir` here is resolved relative to this file's parent directory, so every
+# crate in this clone — workspace members and any crate outside the workspace
+# alike — builds into `<clone>/target`, and a second clone or worktree of this
+# repository, carrying its own copy of this file, builds into its own root. Never
+# point this outside the clone: concurrent worktrees must not share one target
+# directory.
+[build]
+target-dir = "target"
+
+# No debuginfo for dev and test builds (`test` inherits `dev`): cargo passes no
+# `-C debuginfo` level and strips the standard library's. A panic still names its
+# file:line (that location is compiled in, not read from debuginfo) and
+# `cargo llvm-cov` measures through its own instrumentation, while every test
+# binary drops the 2-3x of its size debuginfo was. `release` is untouched.
+[profile.dev]
+debug = 0

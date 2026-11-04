@@ -1,0 +1,5 @@
+# Pinned so local and CI compile with byte-identical rustc, clippy and rustfmt. The crate
+# ships through crates.io (`cargo install`), so no cross-compilation targets are listed.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]

@@ -1,0 +1,50 @@
+{
+  "name": "onebudgetspec-github-action-e2e",
+  "tags": [
+    "type:e2e"
+  ],
+  "implicitDependencies": [
+    "onebudgetspec-github-action"
+  ],
+  "targets": {
+    "format": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo fmt -p onebudgetspec-github-action-e2e"
+      }
+    },
+    "format-check": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo fmt -p onebudgetspec-github-action-e2e -- --check"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo clippy -p onebudgetspec-github-action-e2e --all-targets --locked -- -D warnings"
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo check -p onebudgetspec-github-action-e2e --all-targets --locked"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "bash tools/coverage/rust-coverage.sh onebudgetspec-github-action-e2e"
+      },
+      "dependsOn": [
+        {
+          "target": "build",
+          "projects": [
+            "onebudgetspec-github-action"
+          ]
+        },
+        "workspace:coverage-clear"
+      ]
+    }
+  }
+}

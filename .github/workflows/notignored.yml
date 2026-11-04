@@ -1,0 +1,29 @@
+# One sticky comment per pull request listing the lint and type-check suppressions it
+# adds (an `#[allow]`, an `llmlint: ignore`), each with its reason and a link — so a
+# high-level review of agent-written code sees every check the change switched off.
+#
+# Not a required check: it skips fork pull requests, whose read-only token cannot write
+# the comment, and a required context that never reports would block them.
+name: notignored
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: notignored-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suppressions:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The scan diffs against the base branch, which a shallow checkout omits.
+          fetch-depth: 0
+      - uses: nickderobertis/notignored@v0

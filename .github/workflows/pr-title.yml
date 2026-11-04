@@ -1,0 +1,21 @@
+# Under squash-merge the pull request title becomes the commit release-plz reads, so it
+# must be a Conventional Commit. A required check; its own workflow so a title edit
+# re-runs only this.
+name: pr-title
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

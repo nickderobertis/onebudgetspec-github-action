@@ -1,0 +1,9 @@
+schema_version = 2
+probe = "scripts/release-probe.sh"
+
+[[target]]
+name = "crate"
+id = "crate:onebudgetspec-github-action"
+manifest = "crates/onebudgetspec-github-action/Cargo.toml"
+what = "The scaffold library and binary installed through cargo."
+published_by = ".github/workflows/release-plz.yml release job using release-plz.toml."

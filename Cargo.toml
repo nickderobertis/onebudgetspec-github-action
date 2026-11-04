@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/onebudgetspec-github-action", "crates/onebudgetspec-github-action-e2e", "crates/repo-checks"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+repository = "https://github.com/nickderobertis/onebudgetspec-github-action"
+authors = ["Nick DeRobertis"]
+
+[workspace.dependencies]
+assert_cmd = "2.2.2"
+tempfile = "3.27.0"
+serde_json = "1"
+toml = "1"
+serde_norway = "0.9"
+
+[workspace.lints.rust]
+warnings = "deny"
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+
+[profile.release]
+strip = true

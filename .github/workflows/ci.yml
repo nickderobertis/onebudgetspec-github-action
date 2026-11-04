@@ -1,0 +1,187 @@
+# Prove the artifact from a clean checkout: bootstrap, then the gate at the tier this
+# pull request is for, plus the end-user install path, the supply chain and the MSRV.
+#
+# Which tier runs where is AGENTS.md's "Commits, releases, and merging"; `check` is the
+# one required context, green only when every job it needs is.
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
+    name: gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      # Full history: the affected tier resolves its merge base from it.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # Exports NX_BASE/NX_HEAD, which the justfile's `base` reads.
+      - uses: nrwl/nx-set-shas@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-llvm-cov,cargo-nextest,shellcheck
+      # install-action has no actionlint; its own release script fetches a pinned binary.
+      - name: Install actionlint
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12 "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Bootstrap
+        run: just bootstrap
+      - run: just check
+
+  check-all:
+    if: startsWith(github.head_ref, 'release-plz-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-llvm-cov,cargo-nextest,shellcheck
+      # install-action has no actionlint; its own release script fetches a pinned binary.
+      - name: Install actionlint
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12 "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: just bootstrap
+      - run: just check all
+
+  # The end-user install path on every platform (crates/onebudgetspec-github-action-install/smoke.sh).
+  install:
+    name: install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just fetch
+      - run: just install-smoke
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-llvm-cov,cargo-nextest,cargo-deny,cargo-machete
+      - run: just bootstrap
+      - run: just deny
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-llvm-cov,cargo-nextest
+      - run: just bootstrap
+      - run: just msrv
+
+  check:
+    if: always()
+    needs: [gate, check-all, install, supply-chain, msrv]
+    runs-on: ubuntu-latest
+    steps:
+      # Exactly one of gate and check-all runs; every other job must succeed.
+      - name: Every gate job succeeded
+        env:
+          GATE: ${{ needs.gate.result }}
+          CHECK_ALL: ${{ needs.check-all.result }}
+          OTHERS: ${{ needs.install.result }} ${{ needs.supply-chain.result }} ${{ needs.msrv.result }}
+        run: |
+          case "$GATE/$CHECK_ALL" in
+            success/skipped | skipped/success) ;;
+            *) echo "::error::the gate ended '$GATE' and check-all '$CHECK_ALL'" >&2; exit 1 ;;
+          esac
+          for result in $OTHERS; do
+            [ "$result" = success ] || { echo "::error::a gate job ended '$result': $OTHERS" >&2; exit 1; }
+          done
+
+  # The LLM-judge tier, diff-scoped: a required check separate from `check`. It needs the
+  # harness credential and fails fast without it; fork pull requests wait for maintainer
+  # approval (the repository's fork-workflow setting), never a no-op here.
+  llmlint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Fetch main (diff base)
+        run: git fetch --no-tags origin main
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: astral-sh/setup-uv@v7
+      - name: Install oneharness + llmlint
+        run: |
+          just setup-llmlint
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install the coding harness (claude-code)
+        run: npm i -g @anthropic-ai/claude-code
+      - name: Validate llmlint config (no model)
+        run: just lint-llm-validate --diff-base origin/main
+      - name: Lint changed files
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            echo "::error::llmlint needs the CLAUDE_CODE_OAUTH_TOKEN repository secret (Settings → Secrets and variables → Actions)." >&2
+            exit 1
+          fi
+          just lint-llm-diff origin/main

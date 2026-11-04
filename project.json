@@ -1,0 +1,59 @@
+{
+  "name": "workspace",
+  "tags": [
+    "type:tooling"
+  ],
+  "implicitDependencies": [],
+  "targets": {
+    "coverage-clear": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "bash tools/coverage/rust-coverage.sh --clear"
+      },
+      "cache": false
+    },
+    "coverage": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "bash tools/coverage/rust-coverage.sh --report"
+      },
+      "cache": false,
+      "dependsOn": [
+        {
+          "target": "test",
+          "projects": [
+            "onebudgetspec-github-action",
+            "onebudgetspec-github-action-e2e"
+          ]
+        }
+      ]
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "actionlint && node tools/check-boundaries.mjs"
+      }
+    },
+    "deny": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo deny check && cargo machete"
+      }
+    },
+    "msrv": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "bash tools/msrv.sh"
+      }
+    },
+    "docs": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo doc --locked --no-deps --workspace"
+      },
+      "env": {
+        "RUSTDOCFLAGS": "-D warnings"
+      }
+    }
+  }
+}

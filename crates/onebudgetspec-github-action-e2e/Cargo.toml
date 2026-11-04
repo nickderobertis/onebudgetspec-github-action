@@ -1,0 +1,15 @@
+[package]
+name = "onebudgetspec-github-action-e2e"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates = "3"
+tempfile.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

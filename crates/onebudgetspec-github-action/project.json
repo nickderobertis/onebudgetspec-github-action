@@ -1,0 +1,48 @@
+{
+  "name": "onebudgetspec-github-action",
+  "tags": [
+    "type:app"
+  ],
+  "implicitDependencies": [],
+  "targets": {
+    "format": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo fmt -p onebudgetspec-github-action"
+      }
+    },
+    "format-check": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo fmt -p onebudgetspec-github-action -- --check"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo clippy -p onebudgetspec-github-action --all-targets --locked -- -D warnings"
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo check -p onebudgetspec-github-action --all-targets --locked"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo build --locked -p onebudgetspec-github-action"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "bash tools/coverage/rust-coverage.sh onebudgetspec-github-action"
+      },
+      "dependsOn": [
+        "workspace:coverage-clear"
+      ]
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "install",
+  "tags": [
+    "type:e2e"
+  ],
+  "implicitDependencies": [
+    "onebudgetspec-github-action"
+  ],
+  "targets": {
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "bash tests/install/smoke.sh"
+      }
+    }
+  }
+}

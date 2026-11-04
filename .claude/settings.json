@@ -1,0 +1,43 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/session-setup.sh\"",
+            "timeout": 180,
+            "type": "command"
+          }
+        ],
+        "matcher": "startup|resume"
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(just bootstrap)",
+      "Bash(just check)",
+      "Bash(just test)",
+      "Bash(just lint)",
+      "Bash(just format)",
+      "Bash(just upgrade)",
+      "Bash(just setup-llmlint)",
+      "Bash(just session-setup)",
+      "Bash(just lint-llm:*)",
+      "Bash(just lint-llm-diff:*)",
+      "Bash(llmlint:*)",
+      "Bash(uv lock --upgrade --dry-run)",
+      "Bash(cargo update --dry-run)",
+      "Bash(bun outdated)",
+      "Bash(npm outdated)",
+      "Bash(./scripts/setup-llmlint.sh)",
+      "Bash(./scripts/session-setup.sh)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": []
+  }
+}

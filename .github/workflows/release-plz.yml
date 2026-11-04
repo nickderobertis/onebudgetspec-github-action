@@ -1,0 +1,79 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # The job's own token only reads; every write uses RELEASE_PLZ_TOKEN.
+    permissions:
+      contents: read
+    concurrency:
+      group: release-plz-release
+      cancel-in-progress: false
+    steps:
+      - name: Require the release secrets
+        env:
+          RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          missing=""
+          [ -n "$RELEASE_PLZ_TOKEN" ] || missing="$missing RELEASE_PLZ_TOKEN"
+          [ -n "$CARGO_REGISTRY_TOKEN" ] || missing="$missing CARGO_REGISTRY_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "::error::release-plz needs the repository secret(s):$missing (Settings → Secrets and variables → Actions)." >&2
+            exit 1
+          fi
+      - name: Is this push a merged release pull request?
+        id: release-pr
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          branch="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '[.[] | select(.merged_at != null) | .head.ref][0] // ""')"
+          case "$branch" in
+            release-plz-*) echo "merged=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "merged=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - uses: actions/checkout@v5
+        if: steps.release-pr.outputs.merged == 'true'
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: steps.release-pr.outputs.merged == 'true'
+      - uses: taiki-e/install-action@v2
+        if: steps.release-pr.outputs.merged == 'true'
+        with:
+          tool: release-plz
+      - name: Publish, tag and cut the GitHub Release
+        if: steps.release-pr.outputs.merged == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: release-plz release --config release-plz.toml --git-token "$GITHUB_TOKEN"
+
+  release-pr:
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: release-plz-pr
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: release-plz
+      - name: Open or update the release pull request
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: release-plz release-pr --config release-plz.toml --git-token "$GITHUB_TOKEN"

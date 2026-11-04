@@ -1,0 +1,44 @@
+# Conventional Commits on main drive the release. On every push to main release-plz
+# opens or updates a release pull request (version bump in Cargo.toml and Cargo.lock,
+# the crate's CHANGELOG.md); merging that pull request is the release: release-plz then
+# publishes the crate to crates.io, tags `v<version>` and cuts the GitHub Release.
+# `release-plz release` skips a version crates.io already serves, so a re-run is safe.
+[workspace]
+# `release-plz release` publishes any version crates.io does not serve yet, so the
+# release workflow runs it only for a push that is a merged release pull request (head
+# branch `release-plz-*`); an ordinary push never publishes, the initial 0.1.0 included.
+release_always = true
+# Only release-worthy commits open a release pull request; its own `chore: release`
+# commit is not one.
+release_commits = "^(feat|fix|perf|refactor|build)(\\([^)]+\\))?!?:"
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+semver_check = false
+
+# The one published package: crates.io serves it as `crate:onebudgetspec-github-action`
+# (release-targets.toml).
+[[package]]
+name = "onebudgetspec-github-action"
+publish = true
+changelog_path = "crates/onebudgetspec-github-action/CHANGELOG.md"
+
+# Test-only workspace members: never versioned, tagged or published.
+[[package]]
+name = "onebudgetspec-github-action-e2e"
+release = false
+publish = false
+
+[[package]]
+name = "repo-checks"
+release = false
+publish = false
+
+[changelog]
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Changed" },
+  { message = "^build", group = "Build" },
+  { message = ".*", skip = true },
+]

@@ -1,0 +1,23 @@
+# Supply-chain policy for `just deny` (cargo-deny): advisories, licences, bans and sources.
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "MPL-2.0", "Unlicense", "CC0-1.0", "BSL-1.0"]
+confidence-threshold = 0.9
+# A short shared allow-list is clearer than one pruned to exactly today's graph.
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
