@@ -5,9 +5,8 @@
     "": {
       "name": "onebudgetspec-github-action-workspace",
       "devDependencies": {
-        "@onebudgetspec/cli": "latest",
-        "@onebudgetspec/sdk": "latest",
-        "nx": "latest",
+        "@onebudgetspec/cli": "0.1.5",
+        "nx": "24.0.4",
       },
     },
   },
@@ -59,8 +58,6 @@
     "@onebudgetspec/cli-win32-arm64": ["@onebudgetspec/cli-win32-arm64@0.1.5", "", { "os": "win32", "cpu": "arm64" }, "sha512-UltK6kofxXPCTZ84M20YFMXZ/DxvzBYoCR4tgvp7CDGBQANQ1wq+hFL8w2wJczDApwLxobilnG9E6rW2o1y3vg=="],
 
     "@onebudgetspec/cli-win32-x64": ["@onebudgetspec/cli-win32-x64@0.1.5", "", { "os": "win32", "cpu": "x64" }, "sha512-7JqBsIu/UYxJJrrXBAF8zrxLq3uG+oFtQEkm6cjbTsRGYpJzgFj5KntJvpNWTnUysgGYix8H4VZJYRRrUnPD2A=="],
-
-    "@onebudgetspec/sdk": ["@onebudgetspec/sdk@0.1.5", "", { "optionalDependencies": { "@onebudgetspec/cli": "0.1.5" } }, "sha512-toA72Z35BdRryOxFx9SF1adI5TBU2fY9Z4ISEbS93wtXx67IaXHBP6qcBB2I2zBijwfwu+cbktVmq4aqrV5E7w=="],
 
     "@tybys/wasm-util": ["@tybys/wasm-util@0.9.0", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-6+7nlbMVX/PVDCwaIQ8nTOPveOcFLSt8GcXdx8hD0bt39uWxYT88uXzqTd4fTvqta7oeUJqudepapKNt2DYJFw=="],
 

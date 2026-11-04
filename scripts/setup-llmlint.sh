@@ -5,7 +5,7 @@
 # oneharness.toml, so nothing is exported for it here.
 #
 # Never blocks session startup: no `set -e`, and it always exits 0. Silent on success;
-# each problem is logged with what to do. crates/dev-setup-e2e drives it.
+# each problem is logged with what to do. the SessionStart hook invokes it.
 set -uo pipefail
 
 # The floor `just lint-llm-diff` (changed-line scoping, three-dot --diff-base) and `just
@@ -16,7 +16,7 @@ log() { printf 'setup-llmlint: %s\n' "$*" >&2; }
 
 if [ -z "${HOME:-}" ] || [ ! -d "$HOME" ]; then
   log "HOME is unset or not a directory, so nothing can be installed under it; set HOME, then re-run"
-  # llmlint: ignore[cli_output_contract] a SessionStart hook must never fail session startup, so this refusal exits 0 by design after reporting on stderr; crates/dev-setup-e2e asserts both.
+  # llmlint: ignore[cli_output_contract] a SessionStart hook must never fail session startup, so this refusal exits 0 by design after reporting on stderr; the hook reports installation failures without aborting session startup.
   exit 0
 fi
 readonly BIN_DIR="$HOME/.local/bin"
@@ -64,5 +64,5 @@ elif ! doctor="$(llmlint doctor 2>&1)"; then
   printf '%s\n' "$doctor" >&2
   log "llmlint doctor reported an issue (above); authenticate a harness oneharness.toml names"
 fi
-# llmlint: ignore[cli_output_contract] a SessionStart hook must never fail session startup, so this exits 0 by design; every problem above is reported on stderr with what to do, and the journeys in crates/dev-setup-e2e assert both.
+# llmlint: ignore[cli_output_contract] a SessionStart hook must never fail session startup, so this exits 0 by design; every problem above is reported on stderr with what to do, so an unavailable optional judge never prevents starting a repair session.
 exit 0

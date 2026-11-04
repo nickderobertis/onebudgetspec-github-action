@@ -45,6 +45,7 @@ class Repository(unittest.TestCase):
             used.update(re.findall(r'secrets\.([A-Z_]+)', file.read_text()))
         self.assertEqual(used - {'GITHUB_TOKEN'}, set(expected))
         self.assertFalse((ROOT / 'action.yml').exists())
+        self.assertEqual((ROOT / 'README.md').read_text(), (ROOT / target['manifest']).parent.joinpath('README.md').read_text())
 
     def test_probe_and_real_onevcs(self):
         binary = shutil.which('onevcs')

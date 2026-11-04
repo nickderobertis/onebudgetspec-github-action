@@ -25,3 +25,4 @@ plugins:
   - "https://raw.githubusercontent.com/nickderobertis/dero-skills/main/skills/bootstrap/create-repo/assets/llmlint/ci.llmlint.yml@1"
   - "https://raw.githubusercontent.com/nickderobertis/dero-skills/main/skills/bootstrap/create-repo/assets/llmlint/releasing.llmlint.yml@1"
   - "https://raw.githubusercontent.com/nickderobertis/dero-skills/main/skills/bootstrap/create-repo/assets/llmlint/tools/onebudgetspec.llmlint.yml@1"
+  - "https://raw.githubusercontent.com/nickderobertis/dero-skills/main/skills/bootstrap/create-repo/assets/llmlint/shapes/library.llmlint.yml@1"

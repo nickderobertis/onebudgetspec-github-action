@@ -14,8 +14,6 @@ authors = ["Nick DeRobertis"]
 assert_cmd = "2.2.2"
 tempfile = "3.27.0"
 serde_json = "1"
-toml = "1"
-serde_norway = "0.9"
 
 [workspace.lints.rust]
 warnings = "deny"
