@@ -5,7 +5,7 @@
 # oneharness.toml, so nothing is exported for it here.
 #
 # Never blocks session startup: no `set -e`, and it always exits 0. Silent on success;
-# each problem is logged with what to do. the SessionStart hook invokes it.
+# each problem is logged with what to do.
 set -uo pipefail
 
 # The floor `just lint-llm-diff` (changed-line scoping, three-dot --diff-base) and `just

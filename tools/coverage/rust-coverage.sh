@@ -48,7 +48,6 @@ case "$REQUEST" in
     rm -rf "$RUNS" || { echo "rust-coverage: could not remove $RUNS (above); delete it by hand, then re-run." >&2; exit 1; }
     ;;
   --report)
-    # Nothing to hold to the floor when no measured suite ran since the clear.
     [ -d "$RUNS" ] || exit 0
     quietly "below ${MIN_LINES}% lines over every crate's run (above); cover the listed lines with a test that drives the real behaviour." \
       cargo llvm-cov report --summary-only --show-missing-lines --fail-under-lines "$MIN_LINES"

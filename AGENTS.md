@@ -28,7 +28,6 @@ plugin; direct tool installation remains supported.
 ## Workflow and invariants
 
 Use just recipes and their Nx graph.
-Formatting, clippy and docs deny warnings; coverage enforces 95% lines.
 Tests drive real binaries, packaged installation and the real onevcs CLI;
 only the external crates.io boundary is stubbed. Cover success and failure.
 Validate boundary inputs, keep public contracts intentional and backward compatible,

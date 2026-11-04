@@ -139,7 +139,6 @@ jobs:
     needs: [gate, check-all, install, supply-chain, msrv]
     runs-on: ubuntu-latest
     steps:
-      # Exactly one of gate and check-all runs; every other job must succeed.
       - name: Every gate job succeeded
         env:
           GATE: ${{ needs.gate.result }}

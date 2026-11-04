@@ -92,7 +92,7 @@ session-setup:
 
 # Install or refresh the judged-lint toolchain (oneharness + llmlint). Idempotent.
 setup-llmlint:
-    ./scripts/setup-llmlint.sh
+    @./scripts/setup-llmlint.sh
 
 # Out of the deterministic gate: these need an authenticated harness and the network.
 

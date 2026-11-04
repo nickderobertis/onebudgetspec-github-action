@@ -20,7 +20,8 @@ def run(args, **kwargs):
 class Repository(unittest.TestCase):
     # Live release orchestration requires PAT/crates credentials and would publish,
     # tag or release. This scaffold task forbids those operations; inspect the actual
-    # workflow/configuration here and prove release-plz update and Cargo dry runs.
+    # workflow/configuration here. Release-plz update and Cargo dry runs are separate
+    # local verification commands, not operations this suite performs.
     def test_workflow_and_secrets(self):
         target, = DECLARATION['target']
         self.assertEqual(DECLARATION['schema_version'], 2)
