@@ -42,6 +42,9 @@
       },
       "dependsOn": [
         "workspace:coverage-clear"
+      ],
+      "outputs": [
+        "{workspaceRoot}/target"
       ]
     }
   }

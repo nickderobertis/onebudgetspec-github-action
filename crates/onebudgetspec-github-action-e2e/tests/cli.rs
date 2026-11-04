@@ -105,3 +105,36 @@ fn help_version_and_rejection_perform_no_work() {
     }
     assert_eq!(std::fs::read_dir(dir.path()).expect("directory").count(), 0);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn output_errors_fail_without_panicking() {
+    use std::fs::OpenOptions;
+    use std::process::{Command, Stdio};
+    for args in [vec!["--help"], vec!["--version"]] {
+        let output = Command::new(binary())
+            .args(args)
+            .stdout(
+                OpenOptions::new()
+                    .write(true)
+                    .open("/dev/full")
+                    .expect("full device"),
+            )
+            .stderr(Stdio::piped())
+            .output()
+            .expect("real binary");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("error: output failed:"));
+    }
+    let status = Command::new(binary())
+        .arg("--unsupported")
+        .stderr(
+            OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .expect("full device"),
+        )
+        .status()
+        .expect("real binary");
+    assert_eq!(status.code(), Some(1));
+}

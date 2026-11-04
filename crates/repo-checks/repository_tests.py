@@ -18,6 +18,9 @@ def run(args, **kwargs):
 
 
 class Repository(unittest.TestCase):
+    # Live release orchestration requires PAT/crates credentials and would publish,
+    # tag or release. This scaffold task forbids those operations; inspect the actual
+    # workflow/configuration here and prove release-plz update and Cargo dry runs.
     def test_workflow_and_secrets(self):
         target, = DECLARATION['target']
         self.assertEqual(DECLARATION['schema_version'], 2)
@@ -46,6 +49,18 @@ class Repository(unittest.TestCase):
         self.assertEqual(used - {'GITHUB_TOKEN'}, set(expected))
         self.assertFalse((ROOT / 'action.yml').exists())
         self.assertEqual((ROOT / 'README.md').read_text(), (ROOT / target['manifest']).parent.joinpath('README.md').read_text())
+
+    def test_configuration_restatements(self):
+        workspace = tomllib.loads((ROOT / 'Cargo.toml').read_text())
+        self.assertEqual(tomllib.loads((ROOT / 'clippy.toml').read_text())['msrv'], workspace['workspace']['package']['rust-version'])
+        measured = set()
+        for file in (ROOT / 'crates').glob('*/project.json'):
+            project = json.loads(file.read_text())
+            if 'rust-coverage.sh ' in project['targets'].get('test', {}).get('options', {}).get('command', ''):
+                measured.add(project['name'])
+                self.assertIn('{workspaceRoot}/target', project['targets']['test']['outputs'])
+        aggregate = json.loads((ROOT / 'project.json').read_text())['targets']['coverage']['dependsOn']
+        self.assertEqual(measured, {name for dependency in aggregate for name in dependency['projects']})
 
     def test_probe_and_real_onevcs(self):
         binary = shutil.which('onevcs')
@@ -83,6 +98,13 @@ class Repository(unittest.TestCase):
                 (json.dumps({'crate': {'id': name, 'max_stable_version': None}}) + '\n200', '0', '', None),
                 ('{invalid}\n200', '0', '', 'release-probe:'),
                 ('', '28', '', 'request failed'),
+                ('{}\n503', '0', '', 'HTTP 503'),
+                (json.dumps({'crate': {'id': 'another', 'max_stable_version': '1.2.3'}}) + '\n200', '0', '', 'different crate'),
+                ('{}\n200', '0', '', 'release-probe:'),
+                ('[]\n200', '0', '', 'release-probe:'),
+                (json.dumps({'crate': {'id': name}}) + '\n200', '0', '', 'release-probe:'),
+                (json.dumps({'crate': {'id': name, 'max_stable_version': 123}}) + '\n200', '0', '', 'invalid stable version'),
+                (json.dumps({'crate': {'id': name, 'max_stable_version': 'bad'}}) + '\n200', '0', '', 'invalid stable version'),
             ]:
                 response_file.write_text(response)
                 exit_file.write_text(code)
@@ -100,6 +122,17 @@ class Repository(unittest.TestCase):
                 else:
                     self.assertEqual(latest.returncode, 0, latest.stderr)
                     self.assertIn(answer if answer else 'no-release', latest.stdout)
+            for arguments in [[], [identifier, identifier]]:
+                output = run([str(checkout / DECLARATION['probe']), *arguments], env=env)
+                self.assertNotEqual(output.returncode, 0)
+                self.assertIn('expected one', output.stderr)
+            declaration_path = checkout / 'release-targets.toml'
+            original = declaration_path.read_text()
+            declaration_path.write_text(original.replace(identifier, 'npm:unsupported'))
+            output = run([str(checkout / DECLARATION['probe']), 'npm:unsupported'], env=env)
+            self.assertNotEqual(output.returncode, 0)
+            self.assertIn('unsupported registry', output.stderr)
+            declaration_path.write_text(original)
             unknown = run([str(checkout / DECLARATION['probe']), 'crate:unknown'], env=env)
             self.assertNotEqual(unknown.returncode, 0)
             self.assertIn('unknown identifier', unknown.stderr)

@@ -1,7 +1,8 @@
 # onebudgetspec-github-action
 
 Rust scaffold only: help and version work; all unsupported arguments fail without
-performing work. The library exposes no operational API. No action.yml is shipped.
+performing work. Exit codes are 0 for help/version, 1 for output failure, and 2
+for unsupported arguments. The library exposes no operational API. No action.yml is shipped.
 
 The planned plugin is a general onebudgetspec-to-onevcs tool independent of GitHub
 Actions or PR comments. This action repository will install/run onebudgetspec with

@@ -1,0 +1,11 @@
+{
+  "name": "provisioners-e2e",
+  "tags": ["type:e2e"],
+  "implicitDependencies": ["scripts"],
+  "targets": {
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {"command": "python3 tests/provisioners/test_setup.py"}
+    }
+  }
+}

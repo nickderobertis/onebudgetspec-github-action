@@ -78,7 +78,7 @@ jobs:
       - run: just bootstrap
       - run: just check all
 
-  # The end-user install path on every platform (crates/onebudgetspec-github-action-install/smoke.sh).
+  # The end-user install path on every platform (tests/install/smoke.sh).
   install:
     name: install (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
