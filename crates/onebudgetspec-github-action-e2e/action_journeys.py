@@ -3,7 +3,7 @@ core and onevcs. Only the GitHub service, release host and package index are dou
 import json
 import os
 from pathlib import Path
-import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -581,12 +581,15 @@ class DirectTool(Journey):
 
             # Saved history of another repository, or a commit this checkout lacks, is refused.
             document = json.loads(saved.read_text())
+            original = json.dumps(document)
             document['repository'] = 'other/repo'
+            for run_entry in document['runs']:
+                run_entry['repository'] = 'other/repo'
             saved.write_text(json.dumps(document))
             refused = self.direct(driver, out, saved)
             self.assertEqual(refused.returncode, 0, refused.stderr)
-            self.assertIn('saved history', refused.stdout)
-            document['repository'] = 'owner/repo'
+            self.assertIn('it names other/repo', refused.stdout)
+            document = json.loads(original)
             for run_entry in document['runs']:
                 run_entry['head_sha'] = 'f' * 40
             document['runs'] = document['runs'][:1]
@@ -677,6 +680,192 @@ class DirectTool(Journey):
             path.unlink()
             answer = subprocess.run(read, capture_output=True, text=True, check=False, env=clean_environment())
             self.assertIn('cannot read', answer.stderr)
+
+
+class Degraded(Journey):
+    """Runners and files that misbehave: each is a reason, and a real verdict still stands."""
+
+    def tools(self):
+        """An install whose core and plugin a test can replace, with the driver copied beside them."""
+        job = self.base(self.repository.commit('install the tools once'))
+        directory = Path(tempfile.mkdtemp(dir=job.temp))
+        shutil.copy2(job.temp / 'onebudgetspec-action/tools/onebudgetspec-github-action', directory)
+        return job.temp / 'onebudgetspec-action/tools', directory
+
+    @staticmethod
+    def script(path, body):
+        path.write_text('#!/usr/bin/env bash\n' + body)
+        path.chmod(0o755)
+
+    def direct(self, directory, *arguments, environment=None, cwd=None):
+        return subprocess.run(
+            [str(directory / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', *arguments],
+            cwd=cwd or self.repository.path, capture_output=True, text=True, check=False,
+            env={**clean_environment(), 'JOURNEY_COUNTS': str(self.counts), **(environment or {})})
+
+    def test_a_core_that_cannot_check_keeps_its_exit_and_every_row(self):
+        self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(5), {})]))
+        real, directory = self.tools()
+        self.script(directory / 'onebudgetspec', f'[ "$1" = check ] && {{ echo broken; exit 2; }}\nexec "{real}/onebudgetspec" "$@"\n')
+        with tempfile.TemporaryDirectory() as out:
+            answer = self.direct(directory, '--base-ref', 'main', '--mode', 'base', '--workflow', '1', '--out', out)
+            self.assertEqual(answer.returncode, 2, answer.stderr)
+            report = json.loads((Path(out) / 'comparison-report.json').read_text())
+            self.assertIn('ordinary check could not run', report['rows'][0]['unavailable'])
+            self.assertFalse((Path(out) / 'rolling-history.json').exists(), 'incomplete results are never appended')
+            self.assertIn('not installed', json.dumps(report['diagnostics']), 'the plugin is missing here too')
+
+    def test_tools_missing_or_answering_nonsense_are_reasons(self):
+        self.repository.write('budgets.yaml', budgets_yaml([('over-budget', reported(500), {})]))
+        real, directory = self.tools()
+        with tempfile.TemporaryDirectory() as out:
+            missing = self.direct(directory, '--out', out, environment={'PATH': '/usr/bin:/bin'})
+            self.assertEqual(missing.returncode, 1)
+            self.assertIn('onebudgetspec is not installed', missing.stderr)
+            os.symlink(real / 'onebudgetspec', directory / 'onebudgetspec')
+            head = self.repository.git('rev-parse', 'HEAD')
+            url = ['--change-url', 'https://github.com/owner/repo/pull/1']
+            # Reporter and history both absent: the report stands, with both reasons.
+            absent = self.direct(directory, '--base-ref', 'main', '--base-sha', head, '--mode', 'pull-request', *url,
+                                 '--workflow', '1', '--out', out, environment={'PATH': '/usr/bin:/bin'})
+            self.assertEqual(absent.returncode, 1, 'the real overrun')
+            self.assertIn('not delivered', absent.stdout)
+            self.assertIn('not installed', absent.stdout)
+            # A plugin that answers nonsense.
+            self.script(directory / 'onebudgetspec-plugin-onevcs', 'echo nonsense; echo trouble >&2\n')
+            garbled = self.direct(directory, '--base-ref', 'main', '--base-sha', head, '--mode', 'pull-request', *url,
+                                  '--workflow', '1', '--out', out, environment={'PATH': '/usr/bin:/bin'})
+            self.assertEqual(garbled.returncode, 1)
+            self.assertIn('answered unreadably', garbled.stdout)
+            # No way to name the workflow, and no base branch at all.
+            unnamed = self.direct(directory, '--base-ref', 'main', '--run-id', 'local', '--out', out)
+            self.assertIn('names the workflow', unnamed.stdout)
+            read_only = self.direct(directory, '--read-only-reason', 'because', '--out', out)
+            self.assertIn('this run names no base branch', read_only.stdout)
+            self.assertIn('read-only run, no comment posted: because', read_only.stdout)
+
+    def test_unusable_output_directories_are_named(self):
+        self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(5), {})]))
+        tools, _ = self.tools()
+        with tempfile.TemporaryDirectory() as directory:
+            blocked = Path(directory) / 'file'
+            blocked.write_text('')
+            answer = self.direct(tools, '--out', str(blocked / 'out'))
+            self.assertEqual(answer.returncode, 1)
+            self.assertIn('choose a writable --out', answer.stderr)
+            nested = Path(directory) / 'nested'
+            (nested / '.state').mkdir(parents=True)
+            (nested / '.state/bin').write_text('')
+            answer = self.direct(tools, '--out', str(nested))
+            self.assertEqual(answer.returncode, 1)
+            self.assertIn('request counter', answer.stderr)
+            rolling = Path(directory) / 'rolling'
+            (rolling / 'rolling-history.json').mkdir(parents=True)
+            answer = self.direct(tools, '--out', str(rolling))
+            self.assertEqual(answer.returncode, 1)
+            self.assertIn('cannot replace', answer.stderr)
+            markdown = Path(directory) / 'markdown'
+            (markdown / 'report.md').mkdir(parents=True)
+            answer = self.direct(tools, '--out', str(markdown))
+            self.assertEqual(answer.returncode, 1)
+            self.assertIn('choose a writable directory', answer.stderr)
+            # A run identity core refuses: nothing is compared, and the reason is core's.
+            refused = self.direct(tools, '--run-id', ' ', '--base-ref', 'main', '--mode', 'base', '--workflow', '1',
+                                  '--out', str(Path(directory) / 'blank'))
+            self.assertEqual(refused.returncode, 2)
+            self.assertIn('refused', refused.stderr)
+            outside = self.direct(tools, '--head-sha', 'a' * 40, '--out', str(Path(directory) / 'o'), cwd=directory)
+            self.assertEqual(outside.returncode, 2)
+            self.assertIn('git cannot list', outside.stderr)
+            self.assertEqual(self.direct(tools, '--repo', 'a/b/c', '--out', directory).returncode, 2)
+
+    def test_a_finish_that_cannot_save_still_answers_the_known_verdict(self):
+        self.repository.write('budgets.yaml', budgets_yaml([('over-budget', reported(500), {})]))
+        tools, _ = self.tools()
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            phased = self.direct(tools, '--out', directory, '--phased')
+            self.assertEqual(phased.returncode, 0, phased.stderr)
+            (out / 'report.md').unlink()
+            (out / 'report.md').mkdir()
+            finish = subprocess.run([str(tools / 'onebudgetspec-github-action'), 'finish', '--out', directory],
+                                    cwd=self.repository.path, capture_output=True, text=True, check=False, env=clean_environment())
+            self.assertEqual(finish.returncode, 1, 'the overrun the saved run already holds')
+            (out / 'budget-run.json').unlink()
+            finish = subprocess.run([str(tools / 'onebudgetspec-github-action'), 'finish', '--out', directory],
+                                    cwd=self.repository.path, capture_output=True, text=True, check=False, env=clean_environment())
+            self.assertEqual(finish.returncode, 1)
+            self.assertIn('cannot read', finish.stderr)
+
+    def test_an_action_step_that_cannot_write_is_diagnostic_not_a_failed_job(self):
+        self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(500), {})]))
+
+        def block_report(job):
+            (job.out / 'report.md').mkdir(parents=True)
+        job = self.base(self.repository.commit('catalog'), before_run=block_report)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertIn('stopped with exit 1', job.stdout)
+
+    def test_own_commands_that_cannot_be_written_or_escape_are_rows(self):
+        self.repository.write('.telemetry', 'a file where the telemetry directory would go\n')
+        self.repository.write('scripts/measure.sh', '#!/usr/bin/env bash\necho "{\\"value\\": 2}" > "$ONEBUDGETSPEC_RESULT"\n')
+        (self.repository.path / 'scripts/measure.sh').chmod(0o755)
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('blocked-own', OWN, {'unit': 'seconds', 'threshold': 120}),
+            ('escaping-own', ['onebudgetspec-github-action', 'telemetry', '--metric', 'report-command-seconds', '--input', '../../x.json'], {}),
+            ('no-input', ['onebudgetspec-github-action', 'telemetry', '--metric', 'report-command-seconds'], {'labels': ['provisional']}),
+            ('by-relative-path', ['scripts/measure.sh'], {}),
+            ('missing-relative-path', ['scripts/absent.sh'], {}),
+        ]))
+        job = self.base(self.repository.commit('catalog'))
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        saved = job.saved('comparison-report.json')['rows']
+        rows = {row['id']: row for row in saved}
+        self.assertIn('not saved', rows['blocked-own']['unavailable'])
+        self.assertIn('leaves the checkout', rows['escaping-own']['unavailable'])
+        self.assertEqual(rows['no-input']['verdict'], 'error', 'an ordinary command, report-only here')
+        self.assertEqual(rows['by-relative-path']['current'], 2.0)
+        self.assertIn('scripts/absent.sh', rows['missing-relative-path']['unavailable'])
+
+    def test_the_request_counter_passes_everything_through(self):
+        real_gh = str(harness.GH / 'gh')
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('non-api', reported(1, 'gh --version > /dev/null 2>&1 || true;'), {}),
+            ('no-path', reported(1, 'gh api --include > /dev/null 2>&1 || true;'), {}),
+            ('unlogged', reported(1, 'env -u BUDGET_PROXY_LOG gh api repos/owner/repo/commits/a > /dev/null;'), {}),
+            ('unwritable-log', reported(1, 'BUDGET_PROXY_LOG=/nonexistent/log gh api repos/owner/repo/commits/b > /dev/null;'), {}),
+            ('host-refuses', ['bash', '-c', 'gh api elsewhere'], {'labels': ['provisional']}),
+            ('jq-field', reported(1, 'gh api -X GET -f q=1 --jq .ok repos/owner/repo/commits/c > /dev/null;'), {}),
+        ]))
+        job = self.base(self.repository.commit('catalog'))
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(job.rows()['host-refuses']['verdict'], 'error', 'a plain 404 is the measurement failing')
+        self.assertEqual(self.host.count('commits/[ab]'), 2)
+
+        # No gh on the runner, and a gh that cannot start: both are that budget's own result.
+        self.repository.write('budgets.yaml', budgets_yaml([('reads', ['bash', '-c', 'gh api repos/owner/repo/commits/d'], {})]))
+        sha = self.repository.commit('reads')
+        tools = job.temp / 'onebudgetspec-action/tools'
+        with tempfile.TemporaryDirectory() as directory:
+            # Only what the journey needs on PATH: this host's real gh must stay out of reach.
+            essentials = Path(directory) / 'essentials'
+            essentials.mkdir()
+            for tool in ('bash', 'git', 'env', 'cat'):
+                os.symlink(shutil.which(tool), essentials / tool)
+            path = {'PATH': f'{tools}:{essentials}'}
+            answer = subprocess.run([str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha, '--out', str(Path(directory) / 'first')],
+                                    cwd=self.repository.path, capture_output=True, text=True, check=False, env={**clean_environment(), **path})
+            self.assertEqual(answer.returncode, 0, answer.stderr)
+            self.assertIn('no GitHub credential', answer.stdout)
+            mode = ['--mode', 'base', '--base-ref', 'main', '--workflow', '1', '--saved-history', str(Path(directory) / 'none')]
+            answer = subprocess.run([str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha, '--out', str(Path(directory) / 'second'), *mode],
+                                    cwd=self.repository.path, capture_output=True, text=True, check=False, env={**clean_environment(), **path})
+            self.assertEqual(answer.returncode, 0, answer.stderr)
+            self.assertIn('needs the GitHub CLI', answer.stdout)
+            answer = subprocess.run([str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha, '--out', str(Path(directory) / 'second'), *mode],
+                                    cwd=self.repository.path, capture_output=True, text=True, check=False,
+                                    env={**clean_environment(), **path, 'ONEVCS_GH': real_gh + '-absent'})
+            self.assertEqual(answer.returncode, 3, 'nothing says the host refused it, so this stays an error')
 
 
 class Contract(unittest.TestCase):

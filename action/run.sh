@@ -60,9 +60,12 @@ report() {
     --started-at "$(cat "$state/started-at")" \
     --install-seconds "$(cat "$state/install-seconds")" \
     || code=$?
+  # Exit 2 is the ordinary refusal of an invalid budgets file. Any other failure here is a
+  # file or stream the report could not use: a diagnostic, never a failed job.
+  [ "$code" -ne 2 ] || printf '%s\n' "$code" > "$exit_file"
   if [ "$code" -ne 0 ]; then
-    printf '%s\n' "$code" > "$exit_file"
-    [ -f "$out/report.md" ] || printf '## Budget report\n\nThe report stopped with exit %s; see this step'"'"'s log.\n' "$code" > "$out/report.md"
+    echo "::warning::the budget report stopped with exit $code; see this step's log."
+    [ -e "$out/report.md" ] || printf '## Budget report\n\nThe report stopped with exit %s; see this step'"'"'s log.\n' "$code" > "$out/report.md"
   fi
 }
 

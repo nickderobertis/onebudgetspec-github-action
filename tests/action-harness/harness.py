@@ -353,7 +353,8 @@ class Job:
     """One run of the action's composite steps, in order, as the runner would take them."""
 
     def __init__(self, host, repository, event_name, sha, event=None, inputs=None, run_id=1, attempt=1,
-                 ref_name='main', ref_type='branch', base_ref='', environment=None, register=True, action_path=None):
+                 ref_name='main', ref_type='branch', base_ref='', environment=None, register=True, action_path=None,
+                 before_run=None):
         self.host, self.repository = host, repository
         self.event_name, self.sha = event_name, sha
         self.run_id, self.attempt = run_id, attempt
@@ -367,6 +368,7 @@ class Job:
             'run_id': str(run_id), 'run_attempt': str(attempt), 'sha': sha, 'ref_name': ref_name,
             'ref_type': ref_type, 'base_ref': base_ref, 'event': event or {}}
         self.action_path = Path(action_path) if action_path else self._packaged_action()
+        self.before_run = before_run
         self.outcomes = {}
         self.stdout = ''
         self.exit_code = None
@@ -386,6 +388,8 @@ class Job:
         return document, {name: str(spec.get('default', '')) for name, spec in document['inputs'].items()}
 
     def run(self):
+        if self.before_run:
+            self.before_run(self)
         document, inputs = self._defaults()
         inputs.update(self.inputs)
         steps_context = {}

@@ -75,7 +75,7 @@ fn output_errors_fail_without_panicking() {
         drop(reader);
         Stdio::from(OwnedFd::from(writer))
     };
-    for args in [vec!["--help"], vec!["--version"]] {
+    for args in [vec!["--help"], vec!["--version"], vec![]] {
         let output = Command::new(binary())
             .args(args)
             .stdout(broken_output())
@@ -85,10 +85,12 @@ fn output_errors_fail_without_panicking() {
         assert_eq!(output.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&output.stderr).contains("error: output failed:"));
     }
-    let status = Command::new(binary())
-        .arg("--unsupported")
-        .stderr(broken_output())
-        .status()
-        .expect("real binary");
-    assert_eq!(status.code(), Some(1));
+    for args in [vec!["--unsupported"], vec!["--help", "--unsupported"]] {
+        let status = Command::new(binary())
+            .args(args)
+            .stderr(broken_output())
+            .status()
+            .expect("real binary");
+        assert_eq!(status.code(), Some(1));
+    }
 }

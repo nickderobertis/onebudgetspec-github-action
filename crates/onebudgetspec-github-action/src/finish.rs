@@ -5,7 +5,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use onebudgetspec_core::comparison::{BudgetRun, ComparisonInput, RollingHistory};
+use onebudgetspec_core::comparison::{
+    BudgetRun, ComparisonInput, ComparisonReport, RollingHistory,
+};
 use serde_json::Value;
 
 use crate::catalog;
@@ -22,8 +24,30 @@ pub fn timestamp() -> String {
 }
 
 /// `finish`: prints whether a final upload is needed, for the action's output file.
+///
+/// A failure to save is a diagnostic: the exit stays what the saved results already say,
+/// so a full disk neither fails a passing job nor hides a known budget failure.
 pub fn run(args: &FinishArgs) -> Result<ExitCode, Failure> {
-    complete(&args.out, &args.main_upload)
+    complete(&args.out, &args.main_upload).or_else(|failure| {
+        let saved = state::read_json(&args.out.join(file::BUDGET_RUN))
+            .and_then(|run| saved_exit(run).ok_or(failure));
+        match saved {
+            Ok(status) => Ok(ExitCode::from(status)),
+            Err(failure) => Err(failure),
+        }
+    })
+}
+
+/// The ordinary exit of a saved run, under its saved enforcement selection.
+fn saved_exit(run: Value) -> Option<u8> {
+    let current: BudgetRun = serde_json::from_value(run).ok()?;
+    let report = ComparisonReport {
+        schema_version: 1,
+        current,
+        rows: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+    u8::try_from(report.exit_code()).ok()
 }
 
 /// Stop the timer, save the telemetry, run the own commands and save their verdicts.
@@ -49,9 +73,8 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
     let uploads = u32::from(phased) * (1 + u32::from(!own.is_empty()));
     let metrics = metrics(&continuation, &wiring.log, stopped_at, uploads);
     telemetry::write(&out.join(file::TELEMETRY), &job_labels, &metrics)?;
-    for (_, path) in &own {
-        telemetry::write(path, &job_labels, &metrics)?;
-    }
+    let (own, unwritable) = write_own_telemetry(own, &job_labels, &metrics);
+    let changed = !own.is_empty() || !unwritable.is_empty();
 
     let mut diagnostics: Vec<String> = continuation["diagnostics"]
         .as_array()
@@ -67,12 +90,17 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
             "the main result upload ended {main_upload}: the previous artifact stays intact and this run's entry is lost from the base history"
         ));
     }
-    let core = tools::locate(tools::CORE)?;
-    if !own.is_empty() {
+    let core_cli = tools::locate(tools::CORE)?;
+    let current = &mut input.current;
+    for (id, reason) in unwritable {
+        if let Some(row) = current.unavailable.iter_mut().find(|row| row.id == id) {
+            row.reason = reason;
+        }
+    }
+    if changed {
         let ids: BTreeSet<&str> = own.iter().map(|(id, _)| id.as_str()).collect();
-        let current = &mut input.current;
         let checked = report::check_partitioned(
-            &core,
+            &core_cli,
             &wiring,
             &current.catalog,
             &ids,
@@ -89,7 +117,7 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
         state::write_json(&out.join(file::BUDGET_RUN), current)?;
         state::write_json(&out.join(file::INPUT), &input)?;
     }
-    let mut compared = report::compare(&core, &out.join(file::INPUT))?;
+    let mut compared = report::compare(&core_cli, &out.join(file::INPUT))?;
     report::save_report(out, &mut compared, &diagnostics)?;
     let exit_status = continuation["invocation_exit"]
         .as_i64()
@@ -97,10 +125,30 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
         .filter(|code| *code != 0)
         .unwrap_or_else(|| compared.exit_code());
     if phased {
-        writeln!(std::io::stdout().lock(), "final-upload={}", !own.is_empty())
+        writeln!(std::io::stdout().lock(), "final-upload={changed}")
             .map_err(|error| Failure::output(format!("output failed: {error}")))?;
     }
     Ok(ExitCode::from(u8::try_from(exit_status).unwrap_or(1)))
+}
+
+/// Write the telemetry each own command reads. A command whose file cannot be written cannot
+/// run, which is its row's reason and nothing more.
+fn write_own_telemetry(
+    own: Vec<(String, PathBuf)>,
+    labels: &[String],
+    metrics: &[Metric<'_>],
+) -> (Vec<(String, PathBuf)>, Vec<(String, String)>) {
+    let mut writable = Vec::new();
+    let mut unwritable = Vec::new();
+    for (id, path) in own {
+        match telemetry::write(&path, labels, metrics) {
+            Ok(()) => writable.push((id, path)),
+            Err(failure) => {
+                unwritable.push((id, format!("its telemetry was not saved: {failure}")))
+            }
+        }
+    }
+    (writable, unwritable)
 }
 
 /// Each own command's id and the checkout path of the telemetry file it reads.

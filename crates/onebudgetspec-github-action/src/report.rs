@@ -249,6 +249,16 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
         ))
     })?;
     let wiring = wiring(&state_directory)?;
+    // A reused directory's old requests say nothing about this run.
+    match std::fs::remove_file(&wiring.log) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(Failure::output(format!(
+                "cannot reset {}: {error}; choose a writable --out",
+                wiring.log.display()
+            )));
+        }
+        _ => {}
+    }
     let core_cli = tools::locate(tools::CORE)?;
     let files = catalog::discover(&catalog::split_list(&args.budget_files))?;
     let budgets = catalog::list(&core_cli, &files)?;
