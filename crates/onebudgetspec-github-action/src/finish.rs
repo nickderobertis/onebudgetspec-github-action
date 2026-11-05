@@ -18,6 +18,9 @@ use crate::state::{self, Failure, Phases, file};
 use crate::telemetry::{self, Metric};
 use crate::tools;
 
+/// Each own command's budget id and the telemetry file it reads.
+type OwnInputs = Vec<(String, PathBuf)>;
+
 /// Now, as the saved results record it.
 pub fn timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -134,17 +137,17 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
 /// Write the telemetry each own command reads. A command whose file cannot be written cannot
 /// run, which is its row's reason and nothing more.
 fn write_own_telemetry(
-    own: Vec<(String, PathBuf)>,
+    own: OwnInputs,
     labels: &[String],
     metrics: &[Metric<'_>],
-) -> (Vec<(String, PathBuf)>, Vec<(String, String)>) {
+) -> (OwnInputs, Vec<(String, String)>) {
     let mut writable = Vec::new();
     let mut unwritable = Vec::new();
     for (id, path) in own {
         match telemetry::write(&path, labels, metrics) {
             Ok(()) => writable.push((id, path)),
             Err(failure) => {
-                unwritable.push((id, format!("its telemetry was not saved: {failure}")))
+                unwritable.push((id, format!("its telemetry was not saved: {failure}")));
             }
         }
     }
@@ -152,7 +155,7 @@ fn write_own_telemetry(
 }
 
 /// Each own command's id and the checkout path of the telemetry file it reads.
-fn own_inputs(continuation: &Value, current: &BudgetRun) -> Vec<(String, PathBuf)> {
+fn own_inputs(continuation: &Value, current: &BudgetRun) -> OwnInputs {
     if continuation["run_own"] != true {
         return Vec::new();
     }
