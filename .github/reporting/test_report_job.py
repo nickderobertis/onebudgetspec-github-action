@@ -1,8 +1,9 @@
-"""Record one complete report job's REST traffic, for `action-report-rest-requests-per-run`.
+"""Record one complete report job's traffic, for `action-report-rest-requests-per-run`.
 
 The workload: 100 budget rows, a rolling file of 20 commits, every runnable command's reads and a
 retried rate-limit response, through action.yml's real steps with only external services doubled.
-The figure saved is the proxy's count, which must agree with what the host double received.
+The figure saved is what the doubled GitHub API received over the whole job, final persistence
+included, which the job's own count must equal. File transfers are recorded beside it.
 """
 import json
 from pathlib import Path
@@ -15,9 +16,10 @@ import harness
 from harness import Host, Job, Repository, budgets_yaml, event_pull_request
 
 ROWS = 100
-COMMANDS_READING_REST = 10
+COMMANDS_READING_REST = 12
 COMMITS = 20
-METRIC = 'report-rest-requests-per-run'
+METRIC = 'report-github-api-requests-per-run'
+TRANSFER_SERVICES = ('artifact-service', 'blob-storage', 'object-storage', 'release-host', 'package-index')
 TELEMETRY = HERE / '.telemetry' / 'report-job.json'
 
 
@@ -77,12 +79,13 @@ class ReportJob(unittest.TestCase):
             self.assertEqual(job.exit_code, 0, job.stdout)
             telemetry = job.saved('report-job.json')
             self.assertEqual(telemetry['metrics'][METRIC]['value'], host.count(''),
-                             f'the proxy and the host disagree: {host.requests}')
+                             f'the job and the host disagree: {host.requests}')
             self.assertEqual(host.count('commits/'), COMMANDS_READING_REST)
+            self.assertEqual(job.outcomes['final-upload'], 'success', job.stdout)
             self.assertEqual(len(job.rows()), ROWS)
             self.assertIn('not-on-this-runner', job.markdown())
             self.assertEqual(len(job.saved('comparison-input.json')['baseline']), COMMITS - (job_options['event_name'] == 'push'))
-            figures.append(telemetry)
+            figures.append(boundary_record(host, telemetry))
 
         worst = max(figures, key=lambda telemetry: telemetry['metrics'][METRIC]['value'])
         TELEMETRY.parent.mkdir(exist_ok=True)
@@ -92,6 +95,22 @@ class ReportJob(unittest.TestCase):
         job = Job(host, repository, event_name, sha, inputs={'token': 'real-token'}, **options)
         self.addCleanup(job.close)
         return job.run()
+
+
+def boundary_record(host, telemetry):
+    """The job's telemetry, restated from the complete traffic the boundary received."""
+    transfers = {service: host.transferred(service) for service in TRANSFER_SERVICES}
+    assert sum(transfers.values()) == len(host.transfers), f'an unclassified transfer: {host.transfers}'
+    api_requests = host.count('')
+    record = json.loads(json.dumps(telemetry))
+    metric = record['metrics'][METRIC]
+    metric['value'] = api_requests
+    listed = ' '.join(f'{service}={count}' for service, count in transfers.items())
+    metric['detail'] += f'; measured at the boundary over the whole job: file transfers {listed}'
+    record['persistence'] = 'measured at the boundary after the job ended, final persistence included'
+    record['boundary'] = {'github_api_requests': api_requests, 'file_transfers': transfers,
+                          'all_http_requests': api_requests + sum(transfers.values())}
+    return record
 
 
 def zip_of(name, content):

@@ -2,9 +2,11 @@
 
 The driver, plugin, onevcs and core all run for real, installed the way the action installs them:
 from a release archive and a wheel served by doubles of the release host and the package index.
-The GitHub service is one in-process HTTP double; `actions/upload-artifact`, which reaches a
-service no test can, is replaced at that same boundary and fails or overwrites as the real one does.
+The real `actions/upload-artifact` code runs too. One in-process HTTP double stands in for GitHub's
+API, its artifact service, blob and object storage, the release host and the package index, and
+records every request of a run: nothing is counted that the double did not receive.
 """
+import base64
 import hashlib
 import http.server
 import io
@@ -15,6 +17,7 @@ import platform
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import threading
 import urllib.request
@@ -27,6 +30,9 @@ REPOSITORY = 'owner/repo'
 WORKFLOW = 42
 TOOLS = ROOT / 'target' / 'action-tools'
 GH = Path(__file__).resolve().parent / 'bin'
+# The exact code `actions/upload-artifact@v4` currently resolves to.
+UPLOAD_ARTIFACT = ('v4.6.2', 'ea165f8d65b6e75b540449e92b4886f43607fa02')
+TWIRP = '/twirp/github.actions.results.api.v1.ArtifactService/'
 _cached = {}
 
 
@@ -88,12 +94,40 @@ def real_wheel():
     return wheel
 
 
+def upload_artifact_entry():
+    """The real action's entry point, fetched once at its pinned commit."""
+    directory = TOOLS / f'upload-artifact-{UPLOAD_ARTIFACT[0]}'
+    entry = directory / 'dist/upload/index.js'
+    if not entry.is_file():
+        url = f'https://codeload.github.com/actions/upload-artifact/tar.gz/{UPLOAD_ARTIFACT[1]}'
+        data = urllib.request.urlopen(url, timeout=120).read()
+        directory.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+            for member in archive.getmembers():
+                member.name = member.name.split('/', 1)[-1]
+                if member.name.startswith('dist/upload/') or member.name == 'action.yml':
+                    archive.extract(member, directory, filter='data')
+    return entry
+
+
+def runtime_token(run_id, attempt):
+    """The token a runner hands an action; the service reads its run identity from the claim."""
+    def encode(document):
+        return base64.urlsafe_b64encode(json.dumps(document).encode()).decode().rstrip('=')
+    claim = {'scp': f'Actions.Results:{run_id}-{attempt}:job', 'exp': 4102444800}
+    return f'{encode({"alg": "none"})}.{encode(claim)}.signature'
+
+
 class Host:
     """GitHub's REST and GraphQL service, the release host and the package index."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.requests = []
+        self.transfers = []
+        self.pending_uploads = {}
+        self.paged_artifacts = False
+        self.transient_finalize_failures = 0
         self.runs = []
         self.artifacts = {}
         self.archives = {}
@@ -113,10 +147,12 @@ class Host:
         host = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+
             def log_message(self, *args):
                 pass
 
-            do_GET = do_POST = do_PATCH = lambda self: host.answer(self)
+            do_GET = do_POST = do_PATCH = do_PUT = lambda self: host.answer(self)
 
         self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         self.url = 'http://127.0.0.1:%d' % self.server.server_port
@@ -133,6 +169,16 @@ class Host:
     def clear_requests(self):
         with self.lock:
             self.requests.clear()
+            self.transfers.clear()
+
+    def transferred(self, service):
+        """How many file-transfer requests one service received."""
+        with self.lock:
+            return sum(1 for name, _, _ in self.transfers if name == service)
+
+    def _transfer(self, service, handler):
+        with self.lock:
+            self.transfers.append((service, handler.command, handler.path))
 
     @staticmethod
     def reply(handler, status, body, headers=()):
@@ -147,18 +193,28 @@ class Host:
         length = int(handler.headers.get('Content-Length', 0))
         body = handler.rfile.read(length)
         path = handler.path
+        if path.startswith(TWIRP):
+            self._transfer('artifact-service', handler)
+            return self.artifact_service(handler, path.removeprefix(TWIRP), json.loads(body))
+        if path.startswith('/blob/'):
+            self._transfer('blob-storage', handler)
+            return self.blob(handler, path, body)
         if path.startswith('/simple/onebudgetspec-cli/'):
+            self._transfer('package-index', handler)
             digest = hashlib.sha256(self.wheel.read_bytes()).hexdigest()
             page = f'<a href="/files/{self.wheel.name}#sha256={digest}">{self.wheel.name}</a>'
             return self.reply(handler, 200, page.encode())
         if path.startswith('/files/'):
+            self._transfer('package-index', handler)
             return self.reply(handler, 200, self.wheel.read_bytes())
         release = re.fullmatch(r'/releases/v[^/]+/(.+)', path)
         if release:
+            self._transfer('release-host', handler)
             asset = self.assets.get(release[1])
             return self.reply(handler, 200 if asset is not None else 404, asset or b'missing')
         objects = re.fullmatch(r'/objects/(\d+)', path)
         if objects:
+            self._transfer('object-storage', handler)
             return self.reply(handler, 200, self.archives[objects[1]])
         with self.lock:
             self.requests.append((handler.command, path))
@@ -208,6 +264,9 @@ class Host:
             return self.reply(handler, 200, json.dumps({'workflow_runs': self.runs}).encode())
         listed = re.fullmatch(r'/repos/owner/repo/actions/runs/(\d+)/artifacts', clean)
         if listed:
+            if self.paged_artifacts and 'page=2' not in path:
+                link = f'<https://api.github.com{clean}?per_page=100&page=2>; rel="next"'
+                return self.reply(handler, 200, b'{"artifacts": []}', [('Link', link)])
             return self.reply(handler, 200, json.dumps({'artifacts': self.artifacts.get(listed[1], [])}).encode())
         archive = re.fullmatch(r'/repos/owner/repo/actions/artifacts/(\d+)/zip', clean)
         if archive:
@@ -235,30 +294,43 @@ class Host:
                 'id': self.next_artifact, 'name': name, 'size_in_bytes': len(data), 'expired': False, 'attempt': attempt})
             return self.next_artifact
 
-    def upload(self, run_id, attempt, name, directory, overwrite):
-        """What upload-artifact does: one counted operation; within one attempt, a name is
-        replaced only if told, and an earlier attempt's artifact stays."""
-        with self.lock:
-            self.requests.append(('UPLOAD', f'artifact/{name}'))
-            failing = self.upload_failures > 0 and self.uploads_before_failing == 0
-            if failing:
-                self.upload_failures -= 1
-            self.uploads_before_failing = max(0, self.uploads_before_failing - 1)
-            existing = self.artifacts.get(str(run_id), [])
-            if overwrite:
-                self.artifacts[str(run_id)] = [a for a in existing if (a['name'], a['attempt']) != (name, attempt)]
-            elif any((a['name'], a['attempt']) == (name, attempt) for a in existing):
-                failing = True
-        if failing:
-            return False
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
-            for path in sorted(Path(directory).rglob('*')):
-                relative = path.relative_to(directory)
-                if path.is_file() and not any(part.startswith('.') for part in relative.parts):
-                    archive.write(path, relative)
-        self.attach(run_id, name, buffer.getvalue(), attempt)
-        return True
+    def artifact_service(self, handler, method, request):
+        """The results service upload-artifact speaks to, as real as its answers need to be."""
+        if method == 'CreateArtifact':
+            run_id, attempt = request['workflow_run_backend_id'].rsplit('-', 1)
+            name = request['name']
+            with self.lock:
+                failing = self.upload_failures > 0 and self.uploads_before_failing == 0
+                if failing:
+                    self.upload_failures -= 1
+                self.uploads_before_failing = max(0, self.uploads_before_failing - 1)
+                taken = any((a['name'], a['attempt']) == (name, int(attempt))
+                            for a in self.artifacts.get(run_id, []))
+                if not failing and not taken:
+                    self.pending_uploads[name] = {'run_id': run_id, 'attempt': int(attempt), 'blocks': []}
+            if failing or taken:
+                status = 403 if failing else 409
+                return self.reply(handler, status, b'{"code":"permission_denied","msg":"refused"}')
+            url = f'{self.url}/blob/{name}?sig=signed'
+            return self.reply(handler, 200, json.dumps({'ok': True, 'signed_upload_url': url}).encode())
+        if method == 'FinalizeArtifact':
+            with self.lock:
+                if self.transient_finalize_failures > 0:
+                    self.transient_finalize_failures -= 1
+                    return self.reply(handler, 503, b'{"code":"unavailable","msg":"try again"}')
+                pending = self.pending_uploads.pop(request['name'])
+            identifier = self.attach(pending['run_id'], request['name'], b''.join(pending['blocks']), pending['attempt'])
+            return self.reply(handler, 200, json.dumps({'ok': True, 'artifact_id': str(identifier)}).encode())
+        return self.reply(handler, 404, json.dumps({'code': 'not_found', 'msg': method}).encode())
+
+    def blob(self, handler, path, body):
+        """Blob storage behind a signed URL: blocks, then the list that commits them."""
+        name = path.split('?')[0].removeprefix('/blob/')
+        if 'comp=block&' in path:
+            with self.lock:
+                self.pending_uploads[name]['blocks'].append(body)
+        headers = [('ETag', '"etag"'), ('Last-Modified', 'Mon, 01 Jan 2026 00:00:00 GMT'), ('x-ms-request-id', 'id')]
+        return self.reply(handler, 201, b'', headers)
 
     def artifact_files(self, run_id, name='budget-results'):
         """The saved files of a run's newest artifact of that name."""
@@ -303,6 +375,11 @@ class Repository:
 
     def close(self):
         self.temporary.cleanup()
+
+
+def harness_major_matches(reference):
+    """action.yml's floating major must be the one the pinned code belongs to."""
+    return UPLOAD_ARTIFACT[0].startswith(reference + '.')
 
 
 def budgets_yaml(entries):
@@ -407,7 +484,7 @@ class Job:
                 steps_context[identifier] = {'outcome': 'skipped', 'outputs': {}}
                 continue
             if 'uses' in step:
-                outcome, outputs = self._upload(step, expression)
+                outcome, outputs = self._upload(step, expression, output_directory / identifier)
             else:
                 outcome, outputs = self._shell(step, expression, output_directory / identifier, summary)
             steps_context[identifier] = {'outcome': outcome, 'outputs': outputs}
@@ -421,13 +498,33 @@ class Job:
             self.host.add_run(self.run_id, self.sha, self.attempt, minute=self.run_id)
         return self
 
-    def _upload(self, step, expression):
-        arguments = {key: expression.substitute(value) for key, value in step['with'].items()}
-        if not step['uses'].startswith('actions/upload-artifact@'):
+    def _upload(self, step, expression, output_file):
+        """Run the real action's code against the doubled services, as the runner would."""
+        version = step['uses'].split('@', 1)
+        if version[0] != 'actions/upload-artifact' or not harness_major_matches(version[1]):
             raise AssertionError(f'unexpected action {step["uses"]}')
-        uploaded = self.host.upload(self.run_id, self.attempt, arguments['name'], arguments['path'],
-                                    arguments.get('overwrite') == 'True')
-        return ('success' if uploaded else 'failure'), {}
+        entry = upload_artifact_entry()
+        declared = yaml.safe_load((entry.parents[2] / 'action.yml').read_text())['inputs']
+        arguments = {name: str(spec.get('default', '')) for name, spec in declared.items()}
+        arguments.update({key: expression.substitute(value) for key, value in step['with'].items()})
+        output_file.touch()
+        environment = {
+            'PATH': os.environ['PATH'],
+            'HOME': str(self.temp),
+            'GITHUB_OUTPUT': str(output_file),
+            'GITHUB_WORKSPACE': str(self.repository.path),
+            'GITHUB_REPOSITORY': REPOSITORY,
+            'GITHUB_RUN_ID': str(self.run_id),
+            'GITHUB_SERVER_URL': 'https://github.com',
+            'RUNNER_TEMP': str(self.temp),
+            'ACTIONS_RUNTIME_TOKEN': runtime_token(self.run_id, self.attempt),
+            'ACTIONS_RESULTS_URL': self.host.url + '/',
+            **{f'INPUT_{name.upper()}': value for name, value in arguments.items()},
+        }
+        result = subprocess.run(['node', str(entry)], cwd=self.repository.path, env=environment,
+                                capture_output=True, text=True, check=False)
+        self.stdout += result.stdout + result.stderr
+        return ('success' if result.returncode == 0 else 'failure'), {}
 
     def _shell(self, step, expression, output_file, summary):
         environment = {

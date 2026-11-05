@@ -47,8 +47,10 @@ missing label is never a reason. Nothing is rerun to fill a row.
 
 A command reading this tool's own telemetry (`onebudgetspec-github-action telemetry ... --input PATH`) runs last. The
 measured interval runs from cold install through the checks, the history read, the comment and the main result
-upload. Only then is the telemetry written to `PATH`, the command run and its verdict saved over the artifact with
-`overwrite`, so its row in the comment says it is still to come and the artifact holds the result.
+upload. Only then is the telemetry written to `PATH`, the command run and its verdict saved. Those main results go to
+the immutable artifact `<artifact-name>-main`, and the completed ones to `<artifact-name>`, the name the base history
+reads. Nothing is overwritten, so a failed final upload leaves the main results whole and only loses that commit from
+the history. A repository with no such command uploads once, to `<artifact-name>`.
 
 ### What fails the job
 
@@ -78,8 +80,13 @@ so an unrelated commit cannot enter. Below five samples a row has no baseline, a
 
 ### Requests
 
-Every `gh` call of a job, retries and budget commands included, passes through a counting proxy; the plugin's own
-`QueryCost` is shown beside it. A rate-limited call is retried once, only when `Retry-After` is at most 60 seconds, and at
+`report-github-api-requests-per-run` counts GitHub API requests, REST and GraphQL with retries and pages: every `gh` call
+of a job, budget commands included, passes through a counting proxy, and the plugin's own `QueryCost` is shown beside it.
+It is not every HTTP operation. Artifact-service, blob, object-storage, release and index transfers are a different
+allowance. A job cannot see them, since `upload-artifact` is another process, so its saved telemetry leaves them out and
+its `persistence` field says which uploads were still pending. `report-job:test` runs the real `upload-artifact` code
+against the doubled services and records them beside the figure, reconciled against that boundary's complete traffic.
+A rate-limited call is retried once, only when `Retry-After` is at most 60 seconds, and at
 most twice in a job. Budget commands run one at a time.
 
 Supported runners: Linux x86_64 and aarch64, and macOS on Apple Silicon. Any other runner gets a diagnostic and no failure.

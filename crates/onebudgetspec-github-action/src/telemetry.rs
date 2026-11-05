@@ -20,8 +20,15 @@ pub struct Metric<'a> {
     pub detail: String,
 }
 
-/// Write the telemetry document carrying `labels` and `metrics` to `path`.
-pub fn write(path: &Path, labels: &[String], metrics: &[Metric<'_>]) -> Result<(), Failure> {
+/// Write the telemetry document carrying `labels` and `metrics` to `path`. `persistence` says
+/// which artifact uploads the document cannot include: they happen in another process, and
+/// are file transfers rather than GitHub API requests.
+pub fn write(
+    path: &Path,
+    labels: &[String],
+    metrics: &[Metric<'_>],
+    persistence: &str,
+) -> Result<(), Failure> {
     let metrics: Map<String, Value> = metrics
         .iter()
         .map(|metric| {
@@ -31,7 +38,12 @@ pub fn write(path: &Path, labels: &[String], metrics: &[Metric<'_>]) -> Result<(
             )
         })
         .collect();
-    let document = json!({"schema_version": 1, "labels": labels, "metrics": metrics});
+    let document = json!({
+        "schema_version": 1,
+        "labels": labels,
+        "metrics": metrics,
+        "persistence": persistence,
+    });
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             Failure::output(format!(

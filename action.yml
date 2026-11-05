@@ -64,7 +64,7 @@ runs:
       continue-on-error: true
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ inputs.artifact-name }}
+        name: ${{ steps.report.outputs.main-artifact }}
         path: ${{ steps.report.outputs.out }}
         if-no-files-found: warn
     - name: Stop the timer and judge this job's own telemetry
@@ -83,11 +83,11 @@ runs:
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ steps.report.outputs.out }}
-        overwrite: true
         if-no-files-found: warn
     - name: Conclude with the ordinary budget verdict
       if: always()
       shell: bash
       env:
         FINAL_UPLOAD: ${{ steps.final-upload.outcome }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
       run: bash "$GITHUB_ACTION_PATH/action/run.sh" conclude

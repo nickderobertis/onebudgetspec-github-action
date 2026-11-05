@@ -166,6 +166,9 @@ class Lifecycle(Journey):
         # A pull request never writes the base history.
         self.assertIsNone(self.history_of(job.run_id))
         self.assertEqual(job.outcomes['final-upload'], 'success')
+        main = json.loads(self.host.artifact_files(job.run_id, 'budget-results-main')['budget-run.json'])
+        self.assertFalse([r for r in main['results']['results'] if r['id'] == 'job-seconds'],
+                         'the main upload precedes the own verdict, and stays immutable')
 
         # Another head updates that comment and retains the first head's flags.
         self.catalog(requests=7, enforced=10, shadow=70)
@@ -326,9 +329,10 @@ class Diagnostics(Journey):
         self.host.refuse.append({'path': r'artifacts\?', 'status': 429, 'times': 1, 'retry_after': 1})
         job = self.pull_request(head, base.sha)
         self.assertEqual(job.exit_code, 1)
-        self.assertIn('retries=1', job.saved('report-job.json')['metrics']['report-rest-requests-per-run']['detail'])
-        total = job.saved('report-job.json')['metrics']['report-rest-requests-per-run']['value']
-        self.assertEqual(total, self.host.count(''), 'the counter agrees with the host')
+        metric = job.saved('report-job.json')['metrics']['report-github-api-requests-per-run']
+        self.assertIn('retries=1', metric['detail'])
+        self.assertEqual(metric['value'], self.host.count(''), 'the counter agrees with the host')
+        self.assertEqual(self.host.count(r'artifacts\?'), 2, 'the retry is one more request')
         self.assertEqual(job.rows()['reads']['baseline_n'], 1)
 
     def test_a_rate_limited_budget_read_is_unavailable_while_a_real_overrun_fails(self):
@@ -413,7 +417,8 @@ class Forks(Journey):
         self.assertEqual(job.exit_code, 0, job.stdout)
         self.assertEqual(self.executed(), [])
         self.assertIn('privileged', job.rows()['would-run']['unavailable'])
-        self.assertEqual(self.host.count(''), 1, 'nothing but the saved result upload')
+        self.assertEqual(self.host.count(''), 0, 'no GitHub API request at all')
+        self.assertEqual(self.host.transferred('artifact-service'), 2, 'the one saved result upload')
 
 
 class History(Journey):
@@ -453,21 +458,68 @@ class History(Journey):
         self.assertIn(failed.sha, following.markdown())
         self.assertIn('lost', following.markdown())
 
-    def test_failed_final_upload_is_diagnostic_and_the_main_result_was_reported(self):
+    def own_catalog(self):
         self.repository.write('budgets.yaml', budgets_yaml([
             ('steady', reported(5), {}),
             ('job-seconds', OWN, {'unit': 'seconds', 'threshold': 120, 'labels': ['ci-report']}),
         ]))
+
+    def test_failed_final_persistence_leaves_accurate_results_and_counts(self):
+        self.own_catalog()
         first = self.base(self.repository.commit('catalog'))
+        self.host.clear_requests()
         self.host.uploads_before_failing = 1
         self.host.upload_failures = 1
         failed = self.base()
         self.assertEqual(failed.exit_code, 0, failed.stdout)
+        self.assertEqual(failed.outcomes['main-upload'], 'success')
         self.assertEqual(failed.outcomes['final-upload'], 'failure')
-        self.assertIn('final result upload failed', failed.stdout)
+        self.assertIn('artifact budget-results-main holds the results', failed.summary)
+        # The main results survive, saying truthfully what they do not hold.
+        files = self.host.artifact_files(failed.run_id, 'budget-results-main')
+        saved = json.loads(files['budget-run.json'])
+        self.assertEqual([r['id'] for r in saved['results']['results']], ['steady'])
+        self.assertIn('measured once', next(r['reason'] for r in saved['unavailable'] if r['id'] == 'job-seconds'))
+        self.assertIsNone(self.host.artifact_files(failed.run_id), 'no half-written final artifact')
+        # The count saved before any upload equals everything the API received: uploads, failed
+        # or not, are transfers, and were tried and recorded without entering the figure.
+        interim = json.loads(files['report-job.json'])
+        metric = interim['metrics']['report-github-api-requests-per-run']
+        self.assertEqual(metric['value'], self.host.count(''), self.host.requests)
+        self.assertIn('still pending', interim['persistence'])
+        self.assertEqual(self.host.transferred('artifact-service'), 3, 'create and finalize, then the refused create')
+        self.assertEqual(self.host.transferred('blob-storage'), 2)
+        # Recovery: the next push reads the run before it, discloses the loss, inserts nothing else.
         following = self.base()
         heads = [run['head_sha'] for run in self.history_of(following.run_id)['runs']]
-        self.assertEqual(heads, [first.sha, following.sha], 'a lost entry, and no unrelated one')
+        self.assertEqual(heads, [first.sha, following.sha])
+        self.assertIn(failed.sha, following.markdown())
+        self.assertEqual(following.outcomes['final-upload'], 'success')
+
+    def test_a_retried_artifact_service_call_is_a_transfer_and_the_count_holds(self):
+        self.own_catalog()
+        self.repository.commit('catalog')
+        self.host.clear_requests()
+        self.host.transient_finalize_failures = 1
+        job = self.base()
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(self.host.transferred('artifact-service'), 5, 'two uploads and the real client retry')
+        metric = job.saved('report-job.json')['metrics']['report-github-api-requests-per-run']
+        self.assertEqual(metric['value'], self.host.count(''))
+
+    def test_every_page_of_a_listing_is_counted(self):
+        self.own_catalog()
+        self.repository.commit('catalog')
+        first = self.base()
+        self.host.paged_artifacts = True
+        self.host.clear_requests()
+        job = self.base()
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(self.host.count(r'/artifacts\?'), 2)
+        metric = job.saved('report-job.json')['metrics']['report-github-api-requests-per-run']
+        self.assertEqual(metric['value'], self.host.count(''))
+        self.assertIn('archive=4', metric['detail'])
+        self.assertIn(first.sha, [run['head_sha'] for run in self.history_of(job.run_id)['runs']])
 
     def test_concurrent_pushes_never_merge_divergent_histories(self):
         self.catalog_one()
@@ -678,8 +730,8 @@ class DirectTool(Journey):
             path = Path(directory) / 'report-job.json'
             result = Path(directory) / 'result.json'
             path.write_text(json.dumps({'schema_version': 1, 'labels': ['ci-report'],
-                                        'metrics': {'report-rest-requests-per-run': {'value': 12, 'detail': 'requests: commands=3'}}}))
-            read = [str(driver), 'telemetry', '--metric', 'report-rest-requests-per-run', '--input', str(path)]
+                                        'metrics': {'report-github-api-requests-per-run': {'value': 12, 'detail': 'requests: commands=3'}}}))
+            read = [str(driver), 'telemetry', '--metric', 'report-github-api-requests-per-run', '--input', str(path)]
             answer = subprocess.run(read, capture_output=True, text=True, check=False,
                                     env={**clean_environment(), 'ONEBUDGETSPEC_RESULT': str(result)})
             self.assertEqual(answer.returncode, 0, answer.stderr)

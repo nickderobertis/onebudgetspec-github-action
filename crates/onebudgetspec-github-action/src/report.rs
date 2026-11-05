@@ -283,7 +283,7 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
     let phase_start = now();
     let (prior, history_cost) = read_history(&config, &wiring, &mut diagnostics);
     phases.archive = now() - phase_start;
-    diagnostics.extend(mode_diagnostics(args));
+    diagnostics.extend(mode_diagnostics(args, &main_artifact(args, &own)));
     let rolling = rolling_history(
         &config,
         prior.as_ref(),
@@ -317,6 +317,13 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
     });
     state::write_json(&state_directory.join(file::CONTINUATION), &continuation)?;
     if args.phased {
+        finish::write_interim_telemetry(out, &continuation, &wiring.log)?;
+        writeln!(
+            std::io::stdout().lock(),
+            "main-artifact={}",
+            main_artifact(args, &own)
+        )
+        .map_err(|error| Failure::output(format!("output failed: {error}")))?;
         return Ok(ExitCode::SUCCESS);
     }
     let answer = finish::complete(out, "none")?;
@@ -324,6 +331,16 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
     write!(std::io::stdout().lock(), "{markdown}")
         .map_err(|error| Failure::output(format!("output failed: {error}")))?;
     Ok(answer)
+}
+
+/// Where the main results go. With own commands still to run, the final upload takes the name
+/// the history reads, so a failure there can never destroy these immutable results.
+fn main_artifact(args: &ReportArgs, own: &[(String, PathBuf)]) -> String {
+    if own.is_empty() || args.mode == Mode::Privileged {
+        args.artifact_name.clone()
+    } else {
+        format!("{}-main", args.artifact_name)
+    }
 }
 
 fn denies_credentials(mode: Mode) -> bool {
@@ -358,7 +375,7 @@ fn current_run(
     }
 }
 
-fn mode_diagnostics(args: &ReportArgs) -> Vec<String> {
+fn mode_diagnostics(args: &ReportArgs, main_artifact: &str) -> Vec<String> {
     let mut diagnostics = Vec::new();
     if args.mode == Mode::ReadOnly && !args.read_only_reason.is_empty() {
         diagnostics.push(format!(
@@ -371,9 +388,17 @@ fn mode_diagnostics(args: &ReportArgs) -> Vec<String> {
             "privileged event: no budget command ran and no comment was posted; run this on pull_request".into(),
         );
     }
+    let saved_in = if main_artifact == args.artifact_name {
+        format!("artifact {main_artifact}")
+    } else {
+        format!(
+            "artifact {main_artifact}, then with this job's own-command verdicts in artifact {}",
+            args.artifact_name
+        )
+    };
     diagnostics.push(format!(
-        "complete results are in artifact {} of {}; artifacts expire under the repository's retention setting, after which that baseline reads as unavailable",
-        args.artifact_name, args.run_url
+        "complete results are in {saved_in} of {}; artifacts expire under the repository's retention setting, after which that baseline reads as unavailable",
+        args.run_url
     ));
     diagnostics
 }

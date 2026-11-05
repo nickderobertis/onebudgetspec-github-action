@@ -14,7 +14,7 @@ summarize() {
 
 report() {
   mkdir -p "$out"
-  printf 'out=%s\n' "$out" >> "$GITHUB_OUTPUT"
+  printf 'out=%s\nmain-artifact=%s\n' "$out" "$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
   if [ -f "$state/install-failed" ]; then
     printf '## Budget report\n\nNo budget ran: %s\n' "$(cat "$state/install-failed")" > "$out/report.md"
     return 0
@@ -59,7 +59,7 @@ report() {
     --out "$out" --phased \
     --started-at "$(cat "$state/started-at")" \
     --install-seconds "$(cat "$state/install-seconds")" \
-    || code=$?
+    >> "$GITHUB_OUTPUT" || code=$?
   # Exit 2 is the ordinary refusal of an invalid budgets file. Any other failure here is a
   # file or stream the report could not use: a diagnostic, never a failed job.
   [ "$code" -ne 2 ] || printf '%s\n' "$code" > "$exit_file"
@@ -80,7 +80,8 @@ finish() {
 conclude() {
   [ ! -f "$out/report.md" ] || summarize "$out/report.md"
   if [ "${FINAL_UPLOAD:-skipped}" = failure ]; then
-    echo "::warning::the final result upload failed: this run's own-command verdicts stay in this job's log only."
+    echo "::warning::the final result upload failed: artifact $ARTIFACT_NAME-main holds the results without this job's own-command verdicts, and this commit is lost from the base history."
+    [ -z "${GITHUB_STEP_SUMMARY:-}" ] || printf '\nThe final result upload failed: artifact %s-main holds the results without this job'"'"'s own-command verdicts, and this commit is lost from the base history.\n' "$ARTIFACT_NAME" >> "$GITHUB_STEP_SUMMARY"
   fi
   [ -f "$exit_file" ] || exit 0
   exit "$(cat "$exit_file")"

@@ -18,6 +18,9 @@ use crate::state::{self, Failure, Phases, file};
 use crate::telemetry::{self, Metric};
 use crate::tools;
 
+/// Every GitHub API request of a run, REST and GraphQL, retries and pages included.
+const GITHUB_API_REQUESTS: &str = "report-github-api-requests-per-run";
+
 /// Each own command's budget id and the telemetry file it reads.
 type OwnInputs = Vec<(String, PathBuf)>;
 
@@ -64,23 +67,22 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
             .map_err(|error| Failure::output(format!("saved comparison input: {error}")))?;
     let own = own_inputs(&continuation, &input.current);
     let phased = continuation["phased"].as_bool().unwrap_or(false);
-    let mut job_labels: Vec<String> = continuation["job_labels"]
-        .as_array()
-        .map(|labels| {
-            labels
-                .iter()
-                .filter_map(|label| label.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
-    // The reader's default, so a repository's own `labels` cannot strand its telemetry budgets.
-    if !job_labels.iter().any(|label| label == telemetry::JOB_LABEL) {
-        job_labels.push(telemetry::JOB_LABEL.to_owned());
-    }
-    let uploads = u32::from(phased) * (1 + u32::from(!own.is_empty()));
-    let metrics = metrics(&continuation, &wiring.log, stopped_at, uploads);
-    telemetry::write(&out.join(file::TELEMETRY), &job_labels, &metrics)?;
-    let (own, unwritable) = write_own_telemetry(own, &job_labels, &metrics);
+    let job_labels = job_labels(&continuation);
+    let persistence = if !phased {
+        "no artifact upload: this run saved its results locally"
+    } else if own.is_empty() {
+        "the one result upload ended before this was written"
+    } else {
+        "the main result upload ended before this was written; the final upload holding this file was still pending"
+    };
+    let metrics = metrics(&continuation, &wiring.log, Some(stopped_at), main_upload);
+    telemetry::write(
+        &out.join(file::TELEMETRY),
+        &job_labels,
+        &metrics,
+        persistence,
+    )?;
+    let (own, unwritable) = write_own_telemetry(own, &job_labels, &metrics, persistence);
     let changed = !own.is_empty() || !unwritable.is_empty();
 
     let mut diagnostics: Vec<String> = continuation["diagnostics"]
@@ -144,11 +146,12 @@ fn write_own_telemetry(
     own: OwnInputs,
     labels: &[String],
     metrics: &[Metric<'_>],
+    persistence: &str,
 ) -> (OwnInputs, Vec<(String, String)>) {
     let mut writable = Vec::new();
     let mut unwritable = Vec::new();
     for (id, path) in own {
-        match telemetry::write(&path, labels, metrics) {
+        match telemetry::write(&path, labels, metrics, persistence) {
             Ok(()) => writable.push((id, path)),
             Err(failure) => {
                 unwritable.push((id, format!("its telemetry was not saved: {failure}")));
@@ -177,7 +180,46 @@ fn own_inputs(continuation: &Value, current: &BudgetRun) -> OwnInputs {
         .collect()
 }
 
-fn metrics<'a>(continuation: &Value, log: &Path, stopped_at: f64, uploads: u32) -> [Metric<'a>; 2] {
+/// The labels the telemetry carries: the job's, and the reader's default, so a repository's own
+/// `labels` cannot strand its telemetry budgets.
+fn job_labels(continuation: &Value) -> Vec<String> {
+    let mut labels: Vec<String> = continuation["job_labels"]
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| label.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !labels.iter().any(|label| label == telemetry::JOB_LABEL) {
+        labels.push(telemetry::JOB_LABEL.to_owned());
+    }
+    labels
+}
+
+/// Save what the main upload can carry: the requests so far, its timer still running.
+pub fn write_interim_telemetry(
+    out: &Path,
+    continuation: &Value,
+    log: &Path,
+) -> Result<(), Failure> {
+    telemetry::write(
+        &out.join(file::TELEMETRY),
+        &job_labels(continuation),
+        &metrics(continuation, log, None, "pending"),
+        "written before any result upload, all of them still pending",
+    )
+}
+
+/// Only what the request log and clocks hold. Artifact uploads run in another process whose
+/// traffic this tool cannot see, so none is counted here or estimated.
+fn metrics<'a>(
+    continuation: &Value,
+    log: &Path,
+    stopped_at: Option<f64>,
+    main_upload: &str,
+) -> Vec<Metric<'a>> {
     let lines = proxy::read_log(log);
     let reached = |phase: &str| {
         lines
@@ -189,27 +231,31 @@ fn metrics<'a>(continuation: &Value, log: &Path, stopped_at: f64, uploads: u32) 
     let commands = reached("commands");
     let (workflow, history, delivery) =
         (reached("workflow"), reached("history"), reached("delivery"));
-    let total = commands + workflow + history + delivery + uploads as usize;
+    let total = commands + workflow + history + delivery;
     let phases = Phases::from_json(&continuation["phases"]);
-    let started_at = continuation["started_at"].as_f64().unwrap_or(stopped_at);
-    let archive_seconds = phases.archive;
-    let seconds = stopped_at - started_at;
     let breakdown = format!(
-        "requests: commands={commands} workflow={workflow} archive={history} (QueryCost {}) delivery={delivery} uploads={uploads} including retries={retries}; seconds: install={:.2} check={:.2} archive={archive_seconds:.2} render={:.2} delivery={:.2}",
-        continuation["history_cost"], phases.install, phases.check, phases.render, phases.delivery,
+        "GitHub API requests (REST and GraphQL): commands={commands} workflow={workflow} archive={history} (QueryCost {}) delivery={delivery} including retries={retries}; artifact and storage transfers are not GitHub API requests and are not in this figure, main upload {main_upload}; seconds: install={:.2} check={:.2} archive={:.2} render={:.2} delivery={:.2}",
+        continuation["history_cost"],
+        phases.install,
+        phases.check,
+        phases.archive,
+        phases.render,
+        phases.delivery,
     );
-    [
-        Metric {
-            name: "report-rest-requests-per-run",
-            value: f64::from(u32::try_from(total).unwrap_or(u32::MAX)),
-            detail: breakdown.clone(),
-        },
-        Metric {
+    let mut metrics = vec![Metric {
+        name: GITHUB_API_REQUESTS,
+        value: f64::from(u32::try_from(total).unwrap_or(u32::MAX)),
+        detail: breakdown.clone(),
+    }];
+    if let Some(stopped_at) = stopped_at {
+        let started_at = continuation["started_at"].as_f64().unwrap_or(stopped_at);
+        metrics.push(Metric {
             name: "report-command-seconds",
-            value: seconds.max(0.0),
+            value: (stopped_at - started_at).max(0.0),
             detail: breakdown,
-        },
-    ]
+        });
+    }
+    metrics
 }
 
 /// Replace the newest rolling entry with the run now holding its own verdicts.
