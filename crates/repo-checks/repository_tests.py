@@ -3,9 +3,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import tomllib
 import unittest
@@ -174,6 +176,87 @@ class Repository(unittest.TestCase):
             unknown = run([binary, 'release', 'latest', str(checkout), '--target', 'unknown', '--json'], env=env)
             self.assertNotEqual(unknown.returncode, 0)
             self.assertIn('unknown', unknown.stderr)
+
+
+class ReleaseRunners(unittest.TestCase):
+    """The archive matrix keeps its runners, and each archive is built on the machine it is named for."""
+
+    # What each gate host owns and how the other targets differ from it, independent of the script.
+    TARGETS = {
+        ('Linux', 'x86_64'): {
+            'own': 'x86_64-unknown-linux-gnu', 'os only': 'x86_64-apple-darwin',
+            'architecture only': 'aarch64-unknown-linux-gnu', 'both': 'aarch64-apple-darwin'},
+        ('Linux', 'aarch64'): {
+            'own': 'aarch64-unknown-linux-gnu', 'os only': 'aarch64-apple-darwin',
+            'architecture only': 'x86_64-unknown-linux-gnu', 'both': 'x86_64-apple-darwin'},
+        ('Darwin', 'arm64'): {
+            'own': 'aarch64-apple-darwin', 'os only': 'aarch64-unknown-linux-gnu',
+            'architecture only': 'x86_64-apple-darwin', 'both': 'x86_64-unknown-linux-gnu'},
+    }[(platform.system(), platform.machine())]
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.temp = Path(temporary.name)
+        self.dist = self.temp / 'dist'
+        driver = self.temp / 'onebudgetspec-github-action'
+        plugin = self.temp / 'plugin/bin/onebudgetspec-plugin-onevcs'
+        plugin.parent.mkdir(parents=True)
+        for binary in (driver, plugin):
+            binary.write_text('#!/bin/sh\n')
+            binary.chmod(0o755)
+        self.environment = {
+            **os.environ, 'DRIVER_BINARY': str(driver), 'PLUGIN_ROOT': str(self.temp / 'plugin'), 'DIST_DIRECTORY': str(self.dist)}
+
+    def build(self, target):
+        return run([shutil.which('bash'), str(ROOT / 'scripts/build-action-archive.sh'), '7.8.9', target], env=self.environment, cwd=self.temp)
+
+    @staticmethod
+    def job(workflow, name):
+        text = (ROOT / '.github/workflows' / workflow).read_text()
+        return re.search(rf'^  {name}:\n(.*?)(?=^  \S|\Z)', text, re.M | re.S)[1]
+
+    def test_apple_archive_runs_on_a_label_the_gate_runs_on(self):
+        matrix = re.findall(r'- \{ runner: ([^,]+), target: ([^ ]+) \}', self.job('release.yml', 'archives'))
+        runners = {target: runner for runner, target in matrix}
+        self.assertEqual(runners, {
+            'x86_64-unknown-linux-gnu': 'ubuntu-24.04',
+            'aarch64-unknown-linux-gnu': 'ubuntu-24.04-arm',
+            'aarch64-apple-darwin': 'macos-latest',
+        })
+        self.assertEqual(set(runners), set(release_probe_archives()))
+        gate = re.search(r'os: \[(.+?)\]', self.job('ci.yml', 'gate'))[1].split(', ')
+        self.assertIn(runners['aarch64-apple-darwin'], gate)
+
+    def test_a_target_that_is_not_this_machine_is_refused(self):
+        for difference in ('os only', 'architecture only', 'both'):
+            target = self.TARGETS[difference]
+            with self.subTest(difference):
+                answer = self.build(target)
+                self.assertNotEqual(answer.returncode, 0)
+                self.assertIn(target, answer.stderr)
+                self.assertIn(f'{platform.system()} {platform.machine()}', answer.stderr)
+                self.assertEqual(list(self.dist.glob('**/*')), [], 'no archive is written')
+
+    def assert_own_archive_written(self, answer):
+        self.assertEqual((answer.returncode, answer.stderr), (0, ''))
+        archive = self.dist / f'onebudgetspec-github-action-7.8.9-{self.TARGETS["own"]}.tar.gz'
+        self.assertEqual(list(self.dist.iterdir()), [archive])
+        with tarfile.open(archive) as contents:
+            names = {Path(name).name for name in contents.getnames()}
+        self.assertLessEqual({'onebudgetspec-github-action', 'onebudgetspec-plugin-onevcs'}, names)
+
+    def test_this_machines_target_writes_its_archive(self):
+        self.assert_own_archive_written(self.build(self.TARGETS['own']))
+
+    def test_overrides_package_without_a_rust_toolchain(self):
+        # PATH holds only the real tools packaging uses: no rustc or cargo for the guard or a build to reach.
+        tools = self.temp / 'tools'
+        tools.mkdir()
+        for tool in ('cp', 'dirname', 'gzip', 'mkdir', 'mktemp', 'rm', 'tar', 'tr', 'uname'):
+            (tools / tool).symlink_to(shutil.which(tool))
+        self.environment['PATH'] = str(tools)
+        self.assert_own_archive_written(self.build(self.TARGETS['own']))
 
 
 class Publishing(unittest.TestCase):
