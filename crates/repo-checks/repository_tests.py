@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import textwrap
 import tomllib
 import unittest
 
@@ -18,6 +19,28 @@ DECLARATION = tomllib.loads((ROOT / 'release-targets.toml').read_text())
 
 def run(args, **kwargs):
     return subprocess.run(args, capture_output=True, text=True, check=False, **kwargs)
+
+
+def mapping(block):
+    """One level of the workflows' block YAML: each key's inline value, or its nested block dedented."""
+    found = {}
+    for key, inline, nested in re.findall(r'(?m)^([\w-]+):(?: (.*))?\n((?:(?: .*)?\n)*)', block):
+        found[key] = textwrap.dedent(nested) if inline in ('', '|') else inline
+    return found
+
+
+def expand(text, contexts):
+    """Evaluate ${{ }} as GitHub does for context paths joined by ||; any other expression raises."""
+    def evaluate(expression):
+        for alternative in expression[1].split('||'):
+            context, *path = alternative.strip().split('.')
+            value = contexts[context]
+            for key in path:
+                value = value.get(key) if value else None
+            if value:
+                return value
+        return ''
+    return re.sub(r'\$\{\{(.+?)\}\}', evaluate, text)
 
 
 def release_probe_archives():
@@ -257,6 +280,121 @@ class ReleaseRunners(unittest.TestCase):
             (tools / tool).symlink_to(shutil.which(tool))
         self.environment['PATH'] = str(tools)
         self.assert_own_archive_written(self.build(self.TARGETS['own']))
+
+
+class ReleaseWorkflow(unittest.TestCase):
+    """Runs release.yml's own lines on both routes; only GitHub's runner and the scripts they call are doubled."""
+
+    WORKFLOW = mapping((ROOT / '.github/workflows/release.yml').read_text())
+    JOBS = mapping(WORKFLOW['jobs'])
+    TARGETS = ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'aarch64-apple-darwin']
+
+    @staticmethod
+    def released(tag):
+        return {'github': {'event': {'release': {'tag_name': tag}}, 'ref_name': tag}, 'inputs': {}}
+
+    @staticmethod
+    def by_hand(tag):
+        # Dispatched from main, so a line reading the ref instead of the input publishes the wrong thing.
+        return {'github': {'event': {'inputs': {'tag': tag}}, 'ref_name': 'main'}, 'inputs': {'tag': tag}}
+
+    @staticmethod
+    def steps(job):
+        return [mapping(textwrap.dedent('  ' + step)) for step in re.findall(r'(?m)^- (.*\n(?:  .*\n|\n)*)', job['steps'])]
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.workspace = Path(temporary.name)
+        self.received = self.workspace / 'received'
+        self.received.touch()
+        (self.workspace / 'scripts').mkdir()
+        for script in ('build-action-archive.sh', 'publish-payload.sh', 'publish-crate.sh'):
+            (self.workspace / 'scripts' / script).write_text('echo "$(basename "$0") $*" >> "$RECEIVED"\n')
+
+    def run_line(self, line, env):
+        # bash -e is what GitHub runs a step with when the step names no shell. Nothing else is
+        # inherited, so a line can only learn the tag from what the workflow gave it.
+        environment = {'PATH': os.environ['PATH'], 'RECEIVED': str(self.received), **env}
+        return run([shutil.which('bash'), '-e', '-c', line], env=environment, cwd=self.workspace)
+
+    def run_job(self, name, job, entry, contexts):
+        """Run one matrix entry's steps in order, stopping at a failure; answers its checkouts and whether it passed."""
+        scope = {**contexts, 'matrix': entry}
+        scope['env'] = {**contexts['env'], **{key: expand(value, scope) for key, value in mapping(job.get('env', '')).items()}}
+        checkouts = []
+        for step in self.steps(job):
+            if step.get('uses', '').startswith('actions/checkout@'):
+                checkouts.append((name, expand(mapping(step['with'])['ref'], scope)))
+            if 'run' in step:
+                env = {**scope['env'], 'GITHUB_REF_NAME': contexts['github']['ref_name']}
+                env.update({key: expand(value, scope) for key, value in mapping(step.get('env', '')).items()})
+                if self.run_line(expand(step['run'], scope), env).returncode:
+                    return checkouts, False
+        return checkouts, True
+
+    def publish(self, route):
+        """Run the jobs as their needs allow; answers each doubled script's arguments and every checkout's ref."""
+        contexts = {**route, 'secrets': {'CARGO_REGISTRY_TOKEN': 'registry-token'}}
+        contexts['github'] = {**route['github'], 'token': 'github-token'}
+        contexts['env'] = {key: expand(value, contexts) for key, value in mapping(self.WORKFLOW['env']).items()}
+        checkouts, passed = [], set()
+        for name, body in self.JOBS.items():
+            job = mapping(body)
+            if not set(filter(None, job.get('needs', '').strip('[]').split(', '))) <= passed:
+                continue
+            targets = re.findall(r'target: ([^ ]+) \}', job.get('strategy', ''))
+            for entry in [{'target': target} for target in targets] or [{}]:
+                ran, succeeded = self.run_job(name, job, entry, contexts)
+                checkouts += ran
+                if not succeeded:
+                    break
+            else:
+                passed.add(name)
+        return self.received.read_text().splitlines(), checkouts
+
+    def test_it_starts_on_a_published_release_or_by_hand_with_a_required_tag(self):
+        triggers = mapping(self.WORKFLOW['on'])
+        self.assertEqual(set(triggers), {'release', 'workflow_dispatch'})
+        self.assertEqual(mapping(triggers['release']), {'types': '[published]'})
+        inputs = mapping(mapping(triggers['workflow_dispatch'])['inputs'])
+        self.assertEqual(set(inputs), {'tag'})
+        tag = mapping(inputs['tag'])
+        self.assertEqual((tag['required'], tag['type']), ('true', 'string'))
+
+    def test_both_routes_hand_the_one_tag_to_every_script_and_checkout(self):
+        for label, route, tag in (('release event', self.released, 'v0.1.0'), ('by hand', self.by_hand, 'v2.3.4-rc.1')):
+            with self.subTest(route=label):
+                self.received.write_text('')
+                received, checkouts = self.publish(route(tag))
+                # The archive script's interface is the bare version, so this line strips the v.
+                builds = [f'build-action-archive.sh {tag.removeprefix("v")} {target}' for target in self.TARGETS]
+                self.assertEqual(received, [*builds, f'publish-payload.sh {tag} dist', f'publish-crate.sh {tag}'])
+                ref = f'refs/tags/{tag}'
+                self.assertEqual(checkouts, [('archives', ref)] * 3 + [('payload', ref), ('crate', ref)])
+
+    def test_a_refused_tag_stops_the_whole_run_before_any_checkout(self):
+        for tag in ('', 'main'):
+            with self.subTest(tag=tag):
+                self.assertEqual(self.publish(self.by_hand(tag)), ([], []))
+
+    def test_the_refusal_is_the_first_step_and_takes_only_a_release_tag(self):
+        refusal = self.steps(mapping(self.JOBS['archives']))[0]
+        self.assertEqual(refusal['name'], 'Require a release tag')
+        for tag in ('v0.1.0', 'v12.3.45', 'v1.2.3-rc.1'):
+            with self.subTest(tag=tag):
+                answer = self.run_line(refusal['run'], {'TAG': tag})
+                self.assertEqual((answer.returncode, answer.stderr), (0, ''))
+        for tag in ('', 'main', '0.1.0', 'v1', 'v1.2.3 ', 'v1.2.3\nmain', 'v1.2.3/../../evil', 'v1.2.3-$(id)'):
+            with self.subTest(tag=tag):
+                answer = self.run_line(refusal['run'], {'TAG': tag})
+                self.assertNotEqual(answer.returncode, 0)
+                self.assertIn('is not a release tag like v1.2.3', answer.stderr)
+
+    def test_three_archives_then_the_payload_then_the_crate(self):
+        archives, payload, crate = (mapping(self.JOBS[name]) for name in ('archives', 'payload', 'crate'))
+        self.assertEqual(re.findall(r'target: ([^ ]+) \}', archives['strategy']), self.TARGETS)
+        self.assertEqual((payload['needs'], crate['needs']), ('[archives]', '[payload]'))
 
 
 class Publishing(unittest.TestCase):

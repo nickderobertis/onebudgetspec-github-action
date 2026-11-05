@@ -44,7 +44,8 @@ linear history and all correctness checks required; admins may override.
 The broader tier runs on release PRs; ordinary changes use affected checks.
 Release PRs auto-merge once their checks pass; release-plz only versions, tags and cuts the
 GitHub Release, whose publication fires release.yml: the action payload first, verified through
-the release probe, the crate last. No manual version editing, tagging or deploy step. Release
+the release probe, the crate last. No manual version editing, tagging or deploy step; only a
+failed publish is started by hand, dispatching release.yml from main with its tag. Release
 orchestration uses RELEASE_PLZ_TOKEN so downstream workflows can run; publication uses
 CARGO_REGISTRY_TOKEN. Credentials are user-managed; see README.md.
 
