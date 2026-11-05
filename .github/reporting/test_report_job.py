@@ -7,8 +7,11 @@ final persistence included. The job's own count plus what reached the API by ano
 equal it. File transfers are recorded beside it.
 """
 import json
+import os
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -82,8 +85,7 @@ class ReportJob(unittest.TestCase):
             job = self.job(host, repository, **job_options)
             self.assertEqual(job.exit_code, 0, job.stdout)
             telemetry = job.saved('report-job.json')
-            self.assertEqual(telemetry['metrics'][METRIC]['value'] + host.requests_not_through_gh, host.count(''),
-                             f'the job and the host disagree: {host.requests}')
+            self.assert_reconciles(host, telemetry)
             self.assertEqual(host.requests_not_through_gh, 1, 'the one curl read')
             self.assertEqual(host.count('commits/'), COMMANDS_READING_REST)
             self.assertEqual(job.outcomes['final-upload'], 'success', job.stdout)
@@ -92,14 +94,63 @@ class ReportJob(unittest.TestCase):
             self.assertEqual(len(job.saved('comparison-input.json')['baseline']), COMMITS - (job_options['event_name'] == 'push'))
             figures.append(boundary_record(host, telemetry))
 
-        worst = max(figures, key=lambda telemetry: telemetry['metrics'][METRIC]['value'])
-        TELEMETRY.parent.mkdir(exist_ok=True)
-        TELEMETRY.write_text(json.dumps(worst))
+        save_worst(figures, TELEMETRY)
+
+    def test_an_unavailable_figure_is_read_back_as_unavailable(self):
+        # The real gh refuses this before sending anything, so the job cannot know its count.
+        refused = 'gh api --no-such-flag repos/owner/repo/commits/refused > /dev/null 2>&1 || true;'
+        write = 'echo "{\\"value\\": 1}" > "$ONEBUDGETSPEC_RESULT"'
+        host = Host()
+        self.addCleanup(host.close)
+        repository = Repository()
+        self.addCleanup(repository.close)
+        repository.write('budgets.yaml', budgets_yaml([('refused-read', ['bash', '-c', refused + write], {})]))
+        job = self.job(host, repository, 'push', repository.commit('catalog'), run_id=700)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        telemetry = job.saved('report-job.json')
+        self.assertIsNone(telemetry['metrics'][METRIC]['value'])
+        self.assertGreater(host.count(''), 0, 'the boundary saw traffic, and it must not stand in for the figure')
+        self.assert_reconciles(host, telemetry)
+
+        # What `budgets` does: the real catalog and the real reader, over what this test saves.
+        with tempfile.TemporaryDirectory() as directory:
+            reporting = Path(directory)
+            shutil.copy(HERE / 'budgets.yaml', reporting / 'budgets.yaml')
+            save_worst([boundary_record(host, telemetry)], reporting / '.telemetry' / 'report-job.json')
+            saved = json.loads((reporting / '.telemetry' / 'report-job.json').read_text())
+            self.assertIsNone(saved['metrics'][METRIC]['value'], 'no number replaces it')
+            self.assertIn('no record of its requests', saved['metrics'][METRIC]['unavailable'])
+            self.assertNotIn('github_api_requests', saved['boundary'])
+            tools = job.temp / 'onebudgetspec-action/tools'
+            checked = harness.bounded_run(
+                [str(tools / 'onebudgetspec'), 'check', '--json', 'budgets.yaml'], cwd=reporting,
+                env={'PATH': f'{tools}:{os.environ["PATH"]}', 'HOME': directory})
+        result, = json.loads(checked.stdout)['results']
+        self.assertEqual(result['id'], 'action-report-github-api-requests-per-run')
+        self.assertEqual(result['verdict'], 'error', checked.stdout)
+        self.assertIsNone(result.get('actual'), 'no figure is reported')
+        self.assertIn('is unavailable', checked.stderr.decode() + json.dumps(result))
+        self.assertNotEqual(checked.returncode, 0, 'an unavailable budget is no pass')
+
+    def assert_reconciles(self, host, telemetry):
+        """The job's own count plus other clients' must equal the boundary's, when it has one."""
+        figure = telemetry['metrics'][METRIC]['value']
+        if figure is not None:
+            self.assertEqual(figure + host.requests_not_through_gh, host.count(''),
+                             f'the job and the host disagree: {host.requests}')
 
     def job(self, host, repository, event_name, sha, **options):
         job = Job(host, repository, event_name, sha, inputs={'token': 'real-token'}, **options)
         self.addCleanup(job.close)
         return job.run()
+
+
+def save_worst(figures, path):
+    """Save the largest figure, or an unavailable one: no number outranks an unknown count."""
+    unknown = [telemetry for telemetry in figures if telemetry['metrics'][METRIC]['value'] is None]
+    worst = unknown[0] if unknown else max(figures, key=lambda telemetry: telemetry['metrics'][METRIC]['value'])
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(worst))
 
 
 def boundary_record(host, telemetry):
@@ -109,6 +160,10 @@ def boundary_record(host, telemetry):
     api_requests = host.count('')
     record = json.loads(json.dumps(telemetry))
     metric = record['metrics'][METRIC]
+    if metric['value'] is None:
+        # The job's count could not be reconciled, so an unknown figure stays unknown.
+        record['boundary'] = {'file_transfers': transfers}
+        return record
     metric['value'] = api_requests
     listed = ' '.join(f'{service}={count}' for service, count in transfers.items())
     metric['detail'] += (f'; measured at the boundary over the whole job: not through gh={host.requests_not_through_gh}, '
