@@ -950,15 +950,21 @@ class Degraded(Journey):
             env={**clean_environment(), 'JOURNEY_COUNTS': str(self.counts), **(environment or {})})
 
     def test_a_core_that_cannot_check_keeps_its_exit_and_every_row(self):
+        # The first budget's own command breaks the catalog, so the real core refuses the later check of the job's figures.
         self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(5), {})]))
         real, directory = self.tools()
-        self.script(directory / 'onebudgetspec', f'[ "$1" = check ] && {{ echo broken; exit 2; }}\nexec "{real}/onebudgetspec" "$@"\n')
+        os.symlink(real / 'onebudgetspec', directory / 'onebudgetspec')
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('steady', reported(5, "echo 'not: [a catalog' > budgets.yaml;"), {}),
+            ('own-seconds', OWN, {'unit': 'seconds', 'threshold': 120}),
+        ]))
         with tempfile.TemporaryDirectory() as out:
             answer = self.direct(directory, '--base-ref', 'main', '--mode', 'base', '--workflow', '1', '--out', out)
-            self.assertEqual(answer.returncode, 2, answer.stderr)
+            self.assertEqual(answer.returncode, 2, answer.stdout + answer.stderr)
             report = json.loads((Path(out) / 'comparison-report.json').read_text())
-            self.assertIn('ordinary check could not run', report['rows'][0]['unavailable'])
-            self.assertFalse((Path(out) / 'rolling-history.json').exists(), 'incomplete results are never appended')
+            rows = {row['id']: row for row in report['rows']}
+            self.assertIn('ordinary check could not run', rows['own-seconds']['unavailable'])
+            self.assertEqual(rows['steady']['verdict'], 'within', 'the first phase saw real results')
             self.assertIn('not installed', json.dumps(report['diagnostics']), 'the plugin is missing here too')
 
     def test_a_core_exiting_zero_with_no_report_is_never_a_success(self):
@@ -1004,10 +1010,11 @@ class Degraded(Journey):
             self.assertEqual(absent.returncode, 1, 'the real overrun')
             self.assertIn('not delivered', absent.stdout)
             self.assertIn('not installed', absent.stdout)
-            # A plugin that answers nonsense.
-            self.script(directory / 'onebudgetspec-plugin-onevcs', 'echo nonsense; echo trouble >&2\n')
+            # The real plugin refuses an artifact name it reads as a flag, and answers no JSON.
+            os.symlink(real / 'onebudgetspec-plugin-onevcs', directory / 'onebudgetspec-plugin-onevcs')
             garbled = self.direct(directory, '--base-ref', 'main', '--base-sha', head, '--mode', 'pull-request', *url,
-                                  '--workflow', '1', '--out', out, environment={'PATH': '/usr/bin:/bin'})
+                                  '--artifact-name=-unreadable', '--workflow', '1', '--out', out,
+                                  environment={'PATH': '/usr/bin:/bin'})
             self.assertEqual(garbled.returncode, 1)
             self.assertIn('answered unreadably', garbled.stdout)
             # No way to name the workflow, and no base branch at all.
