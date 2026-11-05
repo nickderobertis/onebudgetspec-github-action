@@ -26,10 +26,52 @@ const MAX_RETRY_WAIT_SECONDS: u64 = 60;
 /// Retries one whole run may spend, so a limited host is not pressed further.
 const MAX_RETRIES_PER_RUN: usize = 2;
 
-/// How one call ended, as the log records it.
-const RATE_LIMITED: &str = "rate-limited";
-const UNAUTHORIZED: &str = "unauthorized";
-const NO_CREDENTIAL: &str = "no-credential";
+/// How one call ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The host answered with success.
+    Answered,
+    /// The host refused it for a rate limit.
+    RateLimited,
+    /// The host refused the credential.
+    Unauthorized,
+    /// The host answered anything else, or could not be reached.
+    Failed,
+    /// This run gives the caller no credential, so no request was made.
+    NoCredential,
+    /// This runner has no GitHub CLI, so no request was made.
+    NoGh,
+}
+
+impl Outcome {
+    const ALL: [Self; 6] = [
+        Self::Answered,
+        Self::RateLimited,
+        Self::Unauthorized,
+        Self::Failed,
+        Self::NoCredential,
+        Self::NoGh,
+    ];
+
+    /// The spelling the log records.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Answered => "answered",
+            Self::RateLimited => "rate-limited",
+            Self::Unauthorized => "unauthorized",
+            Self::Failed => "failed",
+            Self::NoCredential => "no-credential",
+            Self::NoGh => "no-gh",
+        }
+    }
+
+    /// Back from the log's spelling.
+    fn parse(spelling: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|outcome| outcome.as_str() == spelling)
+    }
+}
 
 /// Whether this process was started as the proxy rather than as the tool.
 pub fn invoked_as_gh() -> bool {
@@ -104,12 +146,18 @@ pub fn run() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
     let is_api = arguments.first().is_some_and(|verb| verb == "api");
     if is_api && std::env::var_os(DENY).is_some() {
-        append(&entry(&arguments, NO_CREDENTIAL, None, false, false));
+        append(&entry(
+            &arguments,
+            Outcome::NoCredential,
+            None,
+            false,
+            false,
+        ));
         eprintln!("gh: this run gives budget commands no GitHub credential");
         return ExitCode::from(4);
     }
     let Some(real) = std::env::var_os(REAL) else {
-        append(&entry(&arguments, "no-gh", None, false, false));
+        append(&entry(&arguments, Outcome::NoGh, None, false, false));
         eprintln!("gh: not installed on this runner; install the GitHub CLI");
         return ExitCode::from(127);
     };
@@ -161,7 +209,7 @@ fn exit_as(answer: &Output) -> ExitCode {
 }
 
 struct Classified {
-    outcome: &'static str,
+    outcome: Outcome,
     status: Option<u16>,
     retry_after: Option<u64>,
 }
@@ -191,7 +239,7 @@ fn classify(answer: &Output) -> Classified {
         .or_else(|| stderr_status(&stderr));
     if answer.status.success() {
         return Classified {
-            outcome: "answered",
+            outcome: Outcome::Answered,
             status,
             retry_after: None,
         };
@@ -204,11 +252,11 @@ fn classify(answer: &Output) -> Classified {
                 || header("x-ratelimit-remaining").as_deref() == Some("0")
                 || text.contains("rate limit")));
     let outcome = if limited {
-        RATE_LIMITED
+        Outcome::RateLimited
     } else if status == Some(401) || text.contains("bad credentials") {
-        UNAUTHORIZED
+        Outcome::Unauthorized
     } else {
-        "failed"
+        Outcome::Failed
     };
     Classified {
         outcome,
@@ -225,7 +273,7 @@ fn stderr_status(stderr: &str) -> Option<u16> {
 /// One log line. Only the path is kept: a request's fields can hold a whole comment body.
 fn entry(
     arguments: &[OsString],
-    outcome: &str,
+    outcome: Outcome,
     status: Option<u16>,
     reached: bool,
     retry: bool,
@@ -234,7 +282,7 @@ fn entry(
         "phase": std::env::var(PHASE).unwrap_or_default(),
         "budget": std::env::var("ONEBUDGETSPEC_BUDGET_ID").ok(),
         "path": request_path(arguments),
-        "outcome": outcome,
+        "outcome": outcome.as_str(),
         "status": status,
         "reached": reached,
         "retry": retry,
@@ -308,17 +356,19 @@ pub fn blocked_reason(log: &[Value], budget: &str) -> Option<String> {
     let line = log
         .iter()
         .rev()
-        .find(|line| line["budget"] == budget && line["outcome"] != "answered")?;
-    match line["outcome"].as_str()? {
-        RATE_LIMITED => Some(format!(
+        .find(|line| line["budget"] == budget && line["outcome"] != Outcome::Answered.as_str())?;
+    match Outcome::parse(line["outcome"].as_str()?)? {
+        Outcome::RateLimited => Some(format!(
             "GitHub refused its read for a rate limit (HTTP {}): measurement unavailable",
             line["status"]
         )),
-        UNAUTHORIZED => {
+        Outcome::Unauthorized => {
             Some("GitHub refused this run's credential: measurement unavailable".into())
         }
-        NO_CREDENTIAL => Some("this run gives budget commands no GitHub credential".into()),
-        "no-gh" => Some("its command needs the GitHub CLI, which this runner does not have".into()),
-        _ => None,
+        Outcome::NoCredential => Some("this run gives budget commands no GitHub credential".into()),
+        Outcome::NoGh => {
+            Some("its command needs the GitHub CLI, which this runner does not have".into())
+        }
+        Outcome::Answered | Outcome::Failed => None,
     }
 }
