@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import textwrap
 import tomllib
 import unittest
 
@@ -229,6 +230,8 @@ class ReleaseRunners(unittest.TestCase):
         self.assertIn(runners['aarch64-apple-darwin'], gate)
 
     def test_both_routes_publish_one_tag_from_this_workflow(self):
+        # Structural because only GitHub can evaluate triggers and contexts, and a real run would
+        # publish; Publishing below drives the scripts themselves, the dispatch itself proves the rest.
         text = (ROOT / '.github/workflows/release.yml').read_text()
         triggers = re.search(r'^on:\n(.*?)(?=^\S)', text, re.M | re.S)[1]
         self.assertRegex(triggers, r'^  release:\n    types: \[published\]\n', 'a published release still starts it')
@@ -253,6 +256,20 @@ class ReleaseRunners(unittest.TestCase):
         self.assertEqual(sorted(targets), ['aarch64-apple-darwin', 'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-gnu'])
         self.assertRegex(jobs['payload'], r'^    needs: \[archives\]\n')
         self.assertRegex(jobs['crate'], r'^    needs: \[payload\]\n')
+
+    def test_only_a_release_tag_reaches_the_first_checkout(self):
+        job = self.job('release.yml', 'archives')
+        self.assertLess(job.index('name: Require a release tag'), job.index('actions/checkout'))
+        script = textwrap.dedent(re.search(r'name: Require a release tag\n\s+run: \|\n(.*?)(?=^      - )', job, re.M | re.S)[1])
+        for tag in ('v0.1.0', 'v12.3.45', 'v1.2.3-rc.1'):
+            with self.subTest(tag=tag):
+                answer = run([shutil.which('bash'), '-e', '-c', script], env={**os.environ, 'TAG': tag})
+                self.assertEqual((answer.returncode, answer.stderr), (0, ''))
+        for tag in ('', 'main', '0.1.0', 'v1', 'v1.2.3 ', 'v1.2.3\nmain', 'v1.2.3/../../evil', 'v1.2.3-$(id)'):
+            with self.subTest(tag=tag):
+                answer = run([shutil.which('bash'), '-e', '-c', script], env={**os.environ, 'TAG': tag})
+                self.assertEqual(answer.returncode, 1)
+                self.assertIn('is not a release tag like v1.2.3', answer.stderr)
 
     def test_a_target_that_is_not_this_machine_is_refused(self):
         for difference in ('os only', 'architecture only', 'both'):
