@@ -13,18 +13,25 @@ pub fn binary() -> PathBuf {
             .parent()
             .and_then(Path::parent)
             .expect("the test executable sits in <target>/<profile>/deps");
-        let path = profile_dir.join(format!(
+        // On macOS cargo copies this binary out of deps/, so any build of it, even an up-to-date
+        // one, removes and re-copies it. Sibling tasks build it in the shared target directory
+        // whenever they run, so the driver gets a directory of its own, still under the profile
+        // directory, where coverage finds it. Only this function writes there: build alone, then
+        // keep a shared lock until this process exits, so no other test's build replaces it mid-spawn.
+        let target_dir = profile_dir.join("e2e-driver");
+        std::fs::create_dir_all(&target_dir)
+            .expect("the driver's own target directory is creatable");
+        let lock = std::fs::File::create(target_dir.join("build.lock"))
+            .expect("the driver's build lock is creatable under its target directory");
+        lock.lock().expect("the driver's build lock is takeable");
+        let profile = profile_dir
+            .file_name()
+            .expect("the profile directory has a name");
+        let path = target_dir.join(profile).join(format!(
             "onebudgetspec-github-action{}",
             std::env::consts::EXE_SUFFIX
         ));
-        // On macOS cargo copies this binary out of deps/, so even an up-to-date build removes
-        // and re-copies it. A sibling test process's build must not run while this one spawns
-        // it: build alone, then keep a shared lock until this process exits.
-        let lock = std::fs::File::create(profile_dir.join("e2e-driver.lock"))
-            .expect("the driver's build lock is creatable under the target directory");
-        lock.lock().expect("the driver's build lock is takeable");
         {
-            let target_dir = profile_dir.parent().expect("<target>/<profile>");
             let mut build = std::process::Command::new(env!("CARGO"));
             build
                 .args([
@@ -35,7 +42,7 @@ pub fn binary() -> PathBuf {
                     "onebudgetspec-github-action",
                 ])
                 .arg("--target-dir")
-                .arg(target_dir);
+                .arg(&target_dir);
             if profile_dir
                 .file_name()
                 .is_some_and(|name| name == "release")
