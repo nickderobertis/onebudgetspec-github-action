@@ -31,11 +31,11 @@ curl -fsSL --retry 2 -o "$archive" "$base/v$version/$archive" \
 curl -fsSL --retry 2 -o SHA256SUMS "$base/v$version/SHA256SUMS" \
   || fail "cannot download SHA256SUMS from release v$version"
 listed="$(grep -F "  $archive" SHA256SUMS)" \
-  || fail "SHA256SUMS of release v$version does not list $archive"
+  || fail "SHA256SUMS of release v$version does not list $archive; add its entry to that release, or use a release that lists it"
 # Compared here rather than with a checker: the one on macOS passes a malformed line.
 digest="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$archive")" \
-  || fail "cannot read $archive to verify its checksum"
-[ "$listed" = "$digest  $archive" ] || fail "$archive does not match its checksum"
+  || fail "cannot read $archive to verify its checksum; check this runner has python3 and free disk space, then re-run the job"
+[ "$listed" = "$digest  $archive" ] || fail "$archive does not match its checksum; re-run the job, and if it recurs, republish release v$version"
 tar -xzf "$archive" -C tools || fail "cannot unpack $archive"
 rm -f "$archive" SHA256SUMS
 
