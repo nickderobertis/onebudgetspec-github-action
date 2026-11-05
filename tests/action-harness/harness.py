@@ -2,7 +2,8 @@
 
 The driver, plugin, onevcs and core all run for real, installed the way the action installs them:
 from a release archive and a wheel served by doubles of the release host and the package index.
-The real `actions/upload-artifact` code runs too. One in-process HTTP double stands in for GitHub's
+The real `gh` and the real `actions/upload-artifact` code run too. `gh` reaches the double through
+its own development host, `github.localhost`, over `HTTP_PROXY`. One in-process HTTP double stands in for GitHub's
 API, its artifact service, blob and object storage, the release host and the package index, and
 records every request of a run: nothing is counted that the double did not receive.
 """
@@ -29,11 +30,19 @@ ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY = 'owner/repo'
 WORKFLOW = 42
 TOOLS = ROOT / 'target' / 'action-tools'
-GH = Path(__file__).resolve().parent / 'bin'
 # The exact code `actions/upload-artifact@v4` currently resolves to.
 UPLOAD_ARTIFACT = ('v4.6.2', 'ea165f8d65b6e75b540449e92b4886f43607fa02')
 TWIRP = '/twirp/github.actions.results.api.v1.ArtifactService/'
+API_ORIGIN = 'http://api.github.localhost'
 _cached = {}
+
+
+def real_gh_environment(host_url, home):
+    """What sends the real `gh` to the double, and never to GitHub, with an empty config."""
+    if shutil.which('gh') is None:
+        raise RuntimeError('the journeys drive the real GitHub CLI; install gh, then re-run')
+    return {'GH_HOST': 'github.localhost', 'HTTP_PROXY': host_url, 'GH_CONFIG_DIR': str(Path(home) / 'gh-config'),
+            'GH_PROMPT_DISABLED': '1'}
 
 
 def dependencies():
@@ -126,7 +135,6 @@ class Host:
         self.requests = []
         self.transfers = []
         self.pending_uploads = {}
-        self.paged_artifacts = False
         self.transient_finalize_failures = 0
         self.runs = []
         self.artifacts = {}
@@ -183,6 +191,8 @@ class Host:
     @staticmethod
     def reply(handler, status, body, headers=()):
         handler.send_response(status)
+        if body[:1] in (b'{', b'['):
+            handler.send_header('Content-Type', 'application/json')
         for key, value in headers:
             handler.send_header(key, value)
         handler.send_header('Content-Length', str(len(body)))
@@ -192,7 +202,8 @@ class Host:
     def answer(self, handler):
         length = int(handler.headers.get('Content-Length', 0))
         body = handler.rfile.read(length)
-        path = handler.path
+        # A request through HTTP_PROXY names its whole URL.
+        path = re.sub(r'^http://[^/]+', '', handler.path)
         if path.startswith(TWIRP):
             self._transfer('artifact-service', handler)
             return self.artifact_service(handler, path.removeprefix(TWIRP), json.loads(body))
@@ -234,9 +245,13 @@ class Host:
     def graphql(self, handler, payload):
         if self.read_status:
             return self.reply(handler, self.read_status, b'{"message":"read refused"}')
+        if 'pagedItems' in payload['query']:
+            page = payload.get('variables', {}).get('endCursor')
+            answer = {'data': {'pagedItems': {'nodes': [1], 'pageInfo': {'hasNextPage': page is None, 'endCursor': 'next'}}}}
+            return self.reply(handler, 200, json.dumps(answer).encode())
         nodes = [dict(id=c['node_id'], databaseId=c['id'], url=c['html_url'], body=c['body'],
                       author={'login': 'viewer'}) for c in self.comments]
-        answer = {'data': {'viewer': {'login': 'viewer'}, 'repository': {'pullRequest': {
+        answer = {'data': {'viewer': {'login': 'viewer'}, 'repository': {'name': 'repo', 'pullRequest': {
             'headRefOid': self.head,
             'comments': {'nodes': nodes, 'pageInfo': {'hasNextPage': False, 'endCursor': None}}}}}}
         self.reply(handler, 200, json.dumps(answer).encode())
@@ -264,13 +279,14 @@ class Host:
             return self.reply(handler, 200, json.dumps({'workflow_runs': self.runs}).encode())
         listed = re.fullmatch(r'/repos/owner/repo/actions/runs/(\d+)/artifacts', clean)
         if listed:
-            if self.paged_artifacts and 'page=2' not in path:
-                link = f'<https://api.github.com{clean}?per_page=100&page=2>; rel="next"'
-                return self.reply(handler, 200, b'{"artifacts": []}', [('Link', link)])
             return self.reply(handler, 200, json.dumps({'artifacts': self.artifacts.get(listed[1], [])}).encode())
         archive = re.fullmatch(r'/repos/owner/repo/actions/artifacts/(\d+)/zip', clean)
         if archive:
             return self.reply(handler, 302, b'', [('Location', self.url + '/objects/' + archive[1])])
+        if clean == '/repos/owner/repo/items':
+            page = int((re.search(r'[?&]page=(\d+)', path) or [0, 1])[1])
+            links = [('Link', f'<{API_ORIGIN}{clean}?page={page + 1}>; rel="next"')] if page < 3 else []
+            return self.reply(handler, 200, b'[1]', links)
         if clean.startswith('/repos/owner/repo/'):
             return self.reply(handler, 200, b'{"ok":true}')
         return self.reply(handler, 404, b'{"message":"Not Found"}')
@@ -528,14 +544,14 @@ class Job:
 
     def _shell(self, step, expression, output_file, summary):
         environment = {
-            'PATH': f'{GH}:{os.environ["PATH"]}',
+            'PATH': os.environ['PATH'],
             'HOME': str(self.temp),
             'ONEVCS_HOME': str(self.temp / 'onevcs-home'),
             'GITHUB_ACTION_PATH': str(self.action_path),
             'GITHUB_OUTPUT': str(output_file),
             'GITHUB_STEP_SUMMARY': str(summary),
             'RUNNER_TEMP': str(self.temp),
-            'BOUNDARY_HOST': self.host.url,
+            **real_gh_environment(self.host.url, self.temp),
             'ONEBUDGETSPEC_ACTION_RELEASES': self.host.url + '/releases',
             'PIP_INDEX_URL': self.host.url + '/simple',
             **self.environment,

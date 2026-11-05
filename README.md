@@ -80,8 +80,9 @@ so an unrelated commit cannot enter. Below five samples a row has no baseline, a
 
 ### Requests
 
-`report-github-api-requests-per-run` counts GitHub API requests, REST and GraphQL with retries and pages: every `gh` call
-of a job, budget commands included, passes through a counting proxy, and the plugin's own `QueryCost` is shown beside it.
+`report-github-api-requests-per-run` counts GitHub API requests, REST and GraphQL with retries and pages. Every `gh` command
+of a job, any verb and budget commands included, passes through a proxy that reads `gh`'s own one-line record of each HTTP
+exchange, and the plugin's own `QueryCost` is shown beside it. A budget command reaching GitHub without `gh` is not seen.
 It is not every HTTP operation. Artifact-service, blob, object-storage, release and index transfers are a different
 allowance. A job cannot see them, since `upload-artifact` is another process, so its saved telemetry leaves them out and
 its `persistence` field says which uploads were still pending. `report-job:test` runs the real `upload-artifact` code
@@ -127,7 +128,7 @@ Use `just --list` for scoped targets; CI runs the strict gate and installation o
 Linux/macOS, with the install journey also on Windows. Dependencies upgrade through
 `just upgrade`. Coverage has a 95% line floor.
 
-Action journeys run `action.yml`'s own steps with the real driver, plugin, core and onevcs; only the GitHub service, the
+Action journeys run `action.yml`'s own steps with the real driver, plugin, core, onevcs and `gh`; only the GitHub service, the
 release host and the package index are doubled (`just test-e2e`). The first run builds the published plugin into
 `target/action-tools` and fetches the core wheel. `report-job:test` records the job's request figure, which
 `action-report-rest-requests-per-run` in [.github/reporting/budgets.yaml](.github/reporting/budgets.yaml) reads back.

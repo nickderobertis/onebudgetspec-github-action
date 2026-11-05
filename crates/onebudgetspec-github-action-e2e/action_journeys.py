@@ -507,19 +507,56 @@ class History(Journey):
         metric = job.saved('report-job.json')['metrics']['report-github-api-requests-per-run']
         self.assertEqual(metric['value'], self.host.count(''))
 
-    def test_every_page_of_a_listing_is_counted(self):
-        self.own_catalog()
+    def test_real_gh_exchanges_are_counted_not_its_invocations(self):
+        graphql = 'query($endCursor: String) { pagedItems(after: $endCursor) { nodes pageInfo { hasNextPage endCursor } } }'
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('one-paged-rest-call', reported(1, 'gh api --paginate repos/owner/repo/items > /dev/null || exit 1;'), {}),
+            ('one-paged-graphql-call', reported(1, f"gh api graphql --paginate -f query='{graphql}' > /dev/null || exit 1;"), {}),
+            ('not-the-api-verb', reported(1, 'gh repo view owner/repo --json name > /dev/null || exit 1;'), {}),
+            ('no-request-at-all', reported(1, 'gh --version > /dev/null || exit 1;'), {}),
+            ('own-seconds', OWN, {'unit': 'seconds', 'threshold': 120}),
+        ]))
         self.repository.commit('catalog')
-        first = self.base()
-        self.host.paged_artifacts = True
         self.host.clear_requests()
         job = self.base()
         self.assertEqual(job.exit_code, 0, job.stdout)
-        self.assertEqual(self.host.count(r'/artifacts\?'), 2)
+        self.assertEqual(self.host.count('/items'), 3, 'one invocation, three pages')
+        self.assertEqual(self.host.count('^/graphql$'), 3, 'one invocation with two pages, and gh repo view')
+        metric = job.saved('report-job.json')['metrics']['report-github-api-requests-per-run']
+        self.assertEqual(metric['value'], self.host.count(''), self.host.requests)
+        self.assertIn('commands=6', metric['detail'])
+        saved = job.saved('budget-run.json')['results']['results']
+        self.assertEqual({r['verdict'] for r in saved}, {'within'}, 'each command really got its answers')
+        # The request lines are this tool's reading, never a command's output.
+        self.assertNotIn('* Request', job.stdout)
+
+    def test_debug_output_a_command_asked_for_stays_and_a_silent_gh_is_disclosed(self):
+        stderr = Path(self.counts_directory.name) / 'stderr'
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('asks-for-debug', reported(1, f'GH_DEBUG=api gh api repos/owner/repo/commits/a > /dev/null 2> {stderr} || exit 1;'), {}),
+        ]))
+        job = self.base(self.repository.commit('catalog'))
+        self.assertIn('* Request to', stderr.read_text())
         metric = job.saved('report-job.json')['metrics']['report-github-api-requests-per-run']
         self.assertEqual(metric['value'], self.host.count(''))
-        self.assertIn('archive=4', metric['detail'])
-        self.assertIn(first.sha, [run['head_sha'] for run in self.history_of(job.run_id)['runs']])
+        self.assertNotIn('gave no request line', metric['detail'])
+        # A gh whose output this cannot read: at least the one request, and it says so.
+        silent = Path(self.counts_directory.name) / 'silent-gh'
+        silent.write_text('#!/usr/bin/env bash\necho "{}"\n')
+        silent.chmod(0o755)
+        self.repository.write('budgets.yaml', budgets_yaml([('reads', reported(1, 'gh api anything > /dev/null || exit 1;'), {})]))
+        sha = self.repository.commit('reads')
+        tools = job.temp / 'onebudgetspec-action/tools'
+        with tempfile.TemporaryDirectory() as directory:
+            answer = subprocess.run(
+                [str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha,
+                 '--mode', 'base', '--base-ref', 'main', '--saved-history', str(Path(directory) / 'none'), '--out', directory],
+                cwd=self.repository.path, capture_output=True, text=True, check=False,
+                env={**clean_environment(), 'ONEVCS_GH': str(silent), 'JOURNEY_COUNTS': str(self.counts)})
+            self.assertEqual(answer.returncode, 0, answer.stderr)
+            metric = json.loads((Path(directory) / 'report-job.json').read_text())['metrics']['report-github-api-requests-per-run']
+            self.assertEqual(metric['value'], 1.0)
+            self.assertIn('1 gh api calls gave no request line', metric['detail'])
 
     def test_concurrent_pushes_never_merge_divergent_histories(self):
         self.catalog_one()
@@ -593,8 +630,8 @@ class History(Journey):
                 [str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--base-ref', 'main',
                  '--mode', 'base', '--workflow', str(harness.WORKFLOW), '--out', directory],
                 cwd=self.repository.path, capture_output=True, text=True, check=False,
-                env={**clean_environment(), 'GH_TOKEN': 'real-token', 'BOUNDARY_HOST': self.host.url,
-                     'ONEVCS_GH': str(harness.GH / 'gh'), 'JOURNEY_COUNTS': str(self.counts)})
+                env={**clean_environment(), 'GH_TOKEN': 'real-token', 'JOURNEY_COUNTS': str(self.counts),
+                     **harness.real_gh_environment(self.host.url, directory)})
             self.assertEqual(answer.returncode, 0, answer.stderr)
             self.assertEqual(self.host.count(r'actions/runs/\d+$'), 0, 'no lookup: the workflow was given')
             rolling = json.loads((Path(directory) / 'rolling-history.json').read_text())
@@ -899,10 +936,9 @@ class Degraded(Journey):
         self.assertIn('scripts/absent.sh', rows['missing-relative-path']['unavailable'])
 
     def test_the_request_counter_passes_everything_through(self):
-        real_gh = str(harness.GH / 'gh')
         self.repository.write('budgets.yaml', budgets_yaml([
             ('non-api', reported(1, 'gh --version > /dev/null 2>&1 || true;'), {}),
-            ('no-path', reported(1, 'gh api --include > /dev/null 2>&1 || true;'), {}),
+            ('usage-error', reported(1, 'gh api --include > /dev/null 2>&1 || true;'), {}),
             ('unlogged', reported(1, 'env -u BUDGET_PROXY_LOG gh api repos/owner/repo/commits/a > /dev/null;'), {}),
             ('unwritable-log', reported(1, 'BUDGET_PROXY_LOG=/nonexistent/log gh api repos/owner/repo/commits/b > /dev/null;'), {}),
             ('host-refuses', ['bash', '-c', 'gh api elsewhere'], {'labels': ['provisional']}),
@@ -935,7 +971,7 @@ class Degraded(Journey):
             self.assertIn('needs the GitHub CLI', answer.stdout)
             answer = subprocess.run([str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha, '--out', str(Path(directory) / 'second'), *mode],
                                     cwd=self.repository.path, capture_output=True, text=True, check=False,
-                                    env={**clean_environment(), **path, 'ONEVCS_GH': real_gh + '-absent'})
+                                    env={**clean_environment(), **path, 'ONEVCS_GH': '/nonexistent/gh'})
             self.assertEqual(answer.returncode, 3, 'nothing says the host refused it, so this stays an error')
 
 

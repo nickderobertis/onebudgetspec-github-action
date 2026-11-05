@@ -228,13 +228,22 @@ fn metrics<'a>(
             .count()
     };
     let retries = lines.iter().filter(|line| line["retry"] == true).count();
+    let uninstrumented = lines
+        .iter()
+        .filter(|line| line["uninstrumented"] == true)
+        .count();
+    let unread = if uninstrumented == 0 {
+        String::new()
+    } else {
+        format!(" ({uninstrumented} gh api calls gave no request line, each counted once)")
+    };
     let commands = reached("commands");
     let (workflow, history, delivery) =
         (reached("workflow"), reached("history"), reached("delivery"));
     let total = commands + workflow + history + delivery;
     let phases = Phases::from_json(&continuation["phases"]);
     let breakdown = format!(
-        "GitHub API requests (REST and GraphQL): commands={commands} workflow={workflow} archive={history} (QueryCost {}) delivery={delivery} including retries={retries}; artifact and storage transfers are not GitHub API requests and are not in this figure, main upload {main_upload}; seconds: install={:.2} check={:.2} archive={:.2} render={:.2} delivery={:.2}",
+        "GitHub API requests (REST and GraphQL): commands={commands} workflow={workflow} archive={history} (QueryCost {}) delivery={delivery} including retries={retries}{unread}; artifact and storage transfers are not GitHub API requests and are not in this figure, main upload {main_upload}; seconds: install={:.2} check={:.2} archive={:.2} render={:.2} delivery={:.2}",
         continuation["history_cost"],
         phases.install,
         phases.check,

@@ -1,8 +1,10 @@
-//! Every GitHub request of a run passes through here, so its total is counted, not estimated.
+//! Every GitHub API request of a run is logged here, so its total is counted, not estimated.
 //!
 //! A run points `ONEVCS_GH` and `PATH`'s `gh` at this executable under the name `gh`. Budget
 //! commands and the plugin then reach GitHub exactly as they would have, one bounded retry
-//! honouring `Retry-After` happens here, and each answer is logged by phase and budget.
+//! honouring `Retry-After` happens here, and each exchange is logged by phase and budget.
+//! `gh` itself says what it sent: under `GH_DEBUG=1` it writes one `* Request to URL` line per
+//! HTTP exchange, without any body, whichever verb made it and however many pages it took.
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,6 +27,10 @@ const DENY: &str = "BUDGET_PROXY_DENY";
 const MAX_RETRY_WAIT_SECONDS: u64 = 60;
 /// Retries one whole run may spend, so a limited host is not pressed further.
 const MAX_RETRIES_PER_RUN: usize = 2;
+
+/// What `gh` writes per HTTP exchange under `GH_DEBUG`, and every line of that kind.
+const REQUEST_LINE: &str = "* Request to ";
+const GH_DEBUG_LINES: &str = "* Request ";
 
 /// How one call ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,39 +151,28 @@ pub fn real_gh() -> Option<OsString> {
 pub fn run() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
     let is_api = arguments.first().is_some_and(|verb| verb == "api");
-    if is_api && std::env::var_os(DENY).is_some() {
-        append(&entry(
-            &arguments,
-            Outcome::NoCredential,
-            None,
-            false,
-            false,
-        ));
+    let local_only = arguments.first().is_none_or(|verb| {
+        ["--version", "version", "--help", "help"].contains(&verb.to_string_lossy().as_ref())
+    });
+    if !local_only && std::env::var_os(DENY).is_some() {
+        append(&unreached(Outcome::NoCredential));
         eprintln!("gh: this run gives budget commands no GitHub credential");
         return ExitCode::from(4);
     }
     let Some(real) = std::env::var_os(REAL) else {
-        append(&entry(&arguments, Outcome::NoGh, None, false, false));
+        append(&unreached(Outcome::NoGh));
         eprintln!("gh: not installed on this runner; install the GitHub CLI");
         return ExitCode::from(127);
     };
-    if !is_api {
-        return exit_as(&forward(&real, &arguments));
-    }
     let mut retried = false;
     loop {
-        let answer = forward(&real, &arguments);
+        let mut answer = forward(&real, &arguments);
         let classified = classify(&answer);
-        append(&entry(
-            &arguments,
-            classified.outcome,
-            classified.status,
-            true,
-            retried,
-        ));
+        let exchanges = take_exchanges(&mut answer.stderr);
+        record(&exchanges, &classified, is_api && !local_only, retried);
         let may_retry = !retried && retries_spent() < MAX_RETRIES_PER_RUN;
         match classified.retry_after {
-            Some(wait) if may_retry && wait <= MAX_RETRY_WAIT_SECONDS => {
+            Some(wait) if is_api && may_retry && wait <= MAX_RETRY_WAIT_SECONDS => {
                 std::thread::sleep(Duration::from_secs(wait));
                 retried = true;
             }
@@ -186,8 +181,81 @@ pub fn run() -> ExitCode {
     }
 }
 
+/// Log one invocation's exchanges with the GitHub API: its outcome belongs to the last one,
+/// since `gh` stops at the first it cannot go on from. An invocation that sent nothing leaves
+/// a line only when it failed, because that failure may be why a measurement has no value.
+fn record(exchanges: &[String], classified: &Classified, is_api: bool, retried: bool) {
+    let api: Vec<&String> = exchanges.iter().filter(|url| is_api_url(url)).collect();
+    for (position, url) in api.iter().enumerate() {
+        let last = position + 1 == api.len();
+        append(&json!({
+            "phase": std::env::var(PHASE).unwrap_or_default(),
+            "budget": std::env::var("ONEBUDGETSPEC_BUDGET_ID").ok(),
+            "path": url.split('?').next().unwrap_or_default(),
+            "outcome": if last { classified.outcome } else { Outcome::Answered }.as_str(),
+            "status": if last { classified.status } else { None },
+            "reached": true,
+            "retry": retried && position == 0,
+        }));
+    }
+    if !api.is_empty() {
+        return;
+    }
+    if is_api && classified.outcome == Outcome::Answered {
+        // `gh api` answered, so it sent at least this one request, in a form this cannot read.
+        let mut line = unreached(Outcome::Answered);
+        line["reached"] = json!(true);
+        line["uninstrumented"] = json!(true);
+        append(&line);
+    } else if classified.outcome != Outcome::Answered {
+        append(&unreached(classified.outcome));
+    }
+}
+
+/// Object storage behind a redirect is a file transfer, not a GitHub API request.
+fn is_api_url(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    host.starts_with("api.") || path.starts_with("api/")
+}
+
+/// Remove `gh`'s request lines from what it wrote, and answer with their URLs. A caller that
+/// asked for debug output itself keeps it.
+fn take_exchanges(stderr: &mut Vec<u8>) -> Vec<String> {
+    let text = String::from_utf8_lossy(stderr).into_owned();
+    let urls = text
+        .lines()
+        .filter_map(|line| line.strip_prefix(REQUEST_LINE))
+        .map(str::to_owned)
+        .collect();
+    if !caller_wants_debug() {
+        let kept: String = text
+            .split_inclusive('\n')
+            .filter(|line| !line.starts_with(GH_DEBUG_LINES))
+            .collect();
+        *stderr = kept.into_bytes();
+    }
+    urls
+}
+
+/// Whether the caller's own `GH_DEBUG` already turns `gh`'s debug output on.
+fn caller_wants_debug() -> bool {
+    std::env::var("GH_DEBUG").is_ok_and(|value| !["", "0", "false", "no"].contains(&value.as_str()))
+}
+
 fn forward(real: &OsString, arguments: &[OsString]) -> Output {
-    match Command::new(real).args(arguments).output() {
+    let mut command = Command::new(real);
+    command
+        .args(arguments)
+        // Forced colour would wrap the lines this reads in escape codes.
+        .env("NO_COLOR", "1")
+        .env_remove("CLICOLOR_FORCE");
+    if !caller_wants_debug() {
+        command.env("GH_DEBUG", "1");
+    }
+    match command.output() {
         Ok(output) => output,
         Err(error) => {
             eprintln!("gh: cannot run the GitHub CLI: {error}");
@@ -270,52 +338,18 @@ fn stderr_status(stderr: &str) -> Option<u16> {
     after.get(..3)?.parse().ok()
 }
 
-/// One log line. Only the path is kept: a request's fields can hold a whole comment body.
-fn entry(
-    arguments: &[OsString],
-    outcome: Outcome,
-    status: Option<u16>,
-    reached: bool,
-    retry: bool,
-) -> Value {
+/// A log line for an invocation no exchange of which can be named. Only a request's path is
+/// ever kept elsewhere: its fields can hold a whole comment body.
+fn unreached(outcome: Outcome) -> Value {
     json!({
         "phase": std::env::var(PHASE).unwrap_or_default(),
         "budget": std::env::var("ONEBUDGETSPEC_BUDGET_ID").ok(),
-        "path": request_path(arguments),
+        "path": "",
         "outcome": outcome.as_str(),
-        "status": status,
-        "reached": reached,
-        "retry": retry,
+        "status": null,
+        "reached": false,
+        "retry": false,
     })
-}
-
-/// The first positional argument after `api`, without its query string.
-fn request_path(arguments: &[OsString]) -> String {
-    const VALUE_FLAGS: [&str; 10] = [
-        "--method",
-        "-X",
-        "-f",
-        "-F",
-        "--field",
-        "--raw-field",
-        "--jq",
-        "-q",
-        "--header",
-        "-H",
-    ];
-    let mut skip_value = false;
-    for argument in arguments.iter().skip(1) {
-        let argument = argument.to_string_lossy();
-        if std::mem::take(&mut skip_value) {
-            continue;
-        }
-        if VALUE_FLAGS.contains(&argument.as_ref()) {
-            skip_value = true;
-        } else if !argument.starts_with('-') {
-            return argument.split('?').next().unwrap_or_default().to_owned();
-        }
-    }
-    String::new()
 }
 
 fn append(line: &Value) {
