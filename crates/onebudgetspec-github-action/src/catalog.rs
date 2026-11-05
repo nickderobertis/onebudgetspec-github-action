@@ -173,6 +173,12 @@ fn own_input(command: &[String]) -> Option<PathBuf> {
     rest.get(position + 1).map(PathBuf::from)
 }
 
+/// The `--metric` an own `telemetry` command reads.
+pub fn own_metric(command: &[String]) -> Option<&str> {
+    let position = command.iter().position(|argument| argument == "--metric")?;
+    command.get(position + 1).map(String::as_str)
+}
+
 /// `input` under `directory`, unless it would leave the checkout.
 pub fn checkout_relative(directory: &Path, input: &Path) -> Option<PathBuf> {
     let joined = directory.join(input);

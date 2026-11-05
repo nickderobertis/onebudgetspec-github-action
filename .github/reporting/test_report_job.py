@@ -2,8 +2,9 @@
 
 The workload: 100 budget rows, a rolling file of 20 commits, every runnable command's reads and a
 retried rate-limit response, through action.yml's real steps with only external services doubled.
-The figure saved is what the doubled GitHub API received over the whole job, final persistence
-included, which the job's own count must equal. File transfers are recorded beside it.
+The figure saved is what the doubled GitHub API received over the whole job, from every client,
+final persistence included. The job's own count plus what reached the API by another client must
+equal it. File transfers are recorded beside it.
 """
 import json
 from pathlib import Path
@@ -32,7 +33,10 @@ def catalog():
         ('not-on-this-runner', ['tool-this-runner-lacks'], {}),
     ]
     for index in range(COMMANDS_READING_REST):
-        command = f'gh api repos/owner/repo/commits/{index} > /dev/null || exit 1; {write}'
+        # One command reads through curl: the job cannot see it, and the boundary still counts it.
+        read = (f'curl -fsS -H "Authorization: Bearer $GH_TOKEN" http://api.github.localhost/repos/owner/repo/commits/{index}'
+                if index == 0 else f'gh api repos/owner/repo/commits/{index}')
+        command = f'{read} > /dev/null || exit 1; {write}'
         entries.append((f'reads-rest-{index}', ['bash', '-c', command], {'unit': 'requests'}))
     while len(entries) < ROWS:
         entries.append((f'local-{len(entries)}', ['bash', '-c', write], {'unit': 'bytes'}))
@@ -78,8 +82,9 @@ class ReportJob(unittest.TestCase):
             job = self.job(host, repository, **job_options)
             self.assertEqual(job.exit_code, 0, job.stdout)
             telemetry = job.saved('report-job.json')
-            self.assertEqual(telemetry['metrics'][METRIC]['value'], host.count(''),
+            self.assertEqual(telemetry['metrics'][METRIC]['value'] + host.requests_not_through_gh, host.count(''),
                              f'the job and the host disagree: {host.requests}')
+            self.assertEqual(host.requests_not_through_gh, 1, 'the one curl read')
             self.assertEqual(host.count('commits/'), COMMANDS_READING_REST)
             self.assertEqual(job.outcomes['final-upload'], 'success', job.stdout)
             self.assertEqual(len(job.rows()), ROWS)
@@ -106,9 +111,12 @@ def boundary_record(host, telemetry):
     metric = record['metrics'][METRIC]
     metric['value'] = api_requests
     listed = ' '.join(f'{service}={count}' for service, count in transfers.items())
-    metric['detail'] += f'; measured at the boundary over the whole job: file transfers {listed}'
+    metric['detail'] += (f'; measured at the boundary over the whole job: not through gh={host.requests_not_through_gh}, '
+                         f'file transfers {listed}')
     record['persistence'] = 'measured at the boundary after the job ended, final persistence included'
-    record['boundary'] = {'github_api_requests': api_requests, 'file_transfers': transfers,
+    record['scope'] = 'every client: measured at the external boundary'
+    record['boundary'] = {'github_api_requests': api_requests, 'not_through_gh': host.requests_not_through_gh,
+                          'file_transfers': transfers,
                           'all_http_requests': api_requests + sum(transfers.values())}
     return record
 

@@ -10,12 +10,16 @@ use crate::state::Failure;
 /// The label proving a telemetry file is a report job's own.
 pub const JOB_LABEL: &str = "ci-report";
 
+/// What a live job's request figure covers. Only an external boundary sees every client.
+const SCOPE: &str =
+    "only requests made through gh are counted here; requests from any other client are not seen";
+
 /// One metric as a budget reports it.
 pub struct Metric<'a> {
     /// The key a budget's `--metric` names.
     pub name: &'a str,
-    /// The figure.
-    pub value: f64,
+    /// The figure, or why it cannot be established. An unknown figure is never estimated.
+    pub value: Result<f64, String>,
     /// Its breakdown, shown in the result's detail.
     pub detail: String,
 }
@@ -34,7 +38,11 @@ pub fn write(
         .map(|metric| {
             (
                 metric.name.to_owned(),
-                json!({"value": metric.value, "detail": metric.detail}),
+                json!({
+                    "value": metric.value.as_ref().ok(),
+                    "unavailable": metric.value.as_ref().err(),
+                    "detail": metric.detail,
+                }),
             )
         })
         .collect();
@@ -43,6 +51,7 @@ pub fn write(
         "labels": labels,
         "metrics": metrics,
         "persistence": persistence,
+        "scope": SCOPE,
     });
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -92,6 +101,9 @@ fn metric(args: &TelemetryArgs) -> Result<(f64, String), String> {
         return Err(format!("it is not labelled {}", args.label));
     }
     let entry = &document["metrics"][&args.metric];
+    if let Some(reason) = entry["unavailable"].as_str() {
+        return Err(format!("metric {} is unavailable: {reason}", args.metric));
+    }
     let value = entry["value"]
         .as_f64()
         .filter(|value| value.is_finite())

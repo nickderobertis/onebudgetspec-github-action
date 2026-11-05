@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -29,6 +28,7 @@ def from_data(before=''):
 
 
 READS_REST = 'gh api repos/owner/repo/commits/main > /dev/null || exit 1;'
+API_METRIC = 'report-github-api-requests-per-run'
 OWN = ['onebudgetspec-github-action', 'telemetry', '--metric', 'report-command-seconds', '--input', '.telemetry/report-job.json']
 
 
@@ -195,7 +195,7 @@ class Lifecycle(Journey):
         with tempfile.TemporaryDirectory() as directory:
             saved_input = Path(directory) / 'comparison-input.json'
             saved_input.write_bytes(self.host.artifact_files(update.run_id)['comparison-input.json'])
-            reproduced = subprocess.run(
+            reproduced = harness.bounded_run(
                 [str(update.temp / 'onebudgetspec-action/tools/onebudgetspec-github-action'), 'reproduce',
                  '--input', str(saved_input), '--json'],
                 capture_output=True, text=True, check=False, cwd=directory, env=clean_environment())
@@ -530,33 +530,106 @@ class History(Journey):
         # The request lines are this tool's reading, never a command's output.
         self.assertNotIn('* Request', job.stdout)
 
-    def test_debug_output_a_command_asked_for_stays_and_a_silent_gh_is_disclosed(self):
+    def test_debug_output_a_command_asked_for_stays(self):
         stderr = Path(self.counts_directory.name) / 'stderr'
         self.repository.write('budgets.yaml', budgets_yaml([
             ('asks-for-debug', reported(1, f'GH_DEBUG=api gh api repos/owner/repo/commits/a > /dev/null 2> {stderr} || exit 1;'), {}),
         ]))
         job = self.base(self.repository.commit('catalog'))
         self.assertIn('* Request to', stderr.read_text())
-        metric = job.saved('report-job.json')['metrics']['report-github-api-requests-per-run']
+        metric = job.saved('report-job.json')['metrics'][API_METRIC]
         self.assertEqual(metric['value'], self.host.count(''))
-        self.assertNotIn('gave no request line', metric['detail'])
-        # A gh whose output this cannot read: at least the one request, and it says so.
+
+    def test_missing_request_instrumentation_is_unavailable_never_an_estimate(self):
+        # A gh that answers without saying what it sent: the count cannot be established.
         silent = Path(self.counts_directory.name) / 'silent-gh'
         silent.write_text('#!/usr/bin/env bash\necho "{}"\n')
         silent.chmod(0o755)
-        self.repository.write('budgets.yaml', budgets_yaml([('reads', reported(1, 'gh api anything > /dev/null || exit 1;'), {})]))
-        sha = self.repository.commit('reads')
-        tools = job.temp / 'onebudgetspec-action/tools'
-        with tempfile.TemporaryDirectory() as directory:
-            answer = subprocess.run(
-                [str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha,
-                 '--mode', 'base', '--base-ref', 'main', '--saved-history', str(Path(directory) / 'none'), '--out', directory],
-                cwd=self.repository.path, capture_output=True, text=True, check=False,
-                env={**clean_environment(), 'ONEVCS_GH': str(silent), 'JOURNEY_COUNTS': str(self.counts)})
-            self.assertEqual(answer.returncode, 0, answer.stderr)
-            metric = json.loads((Path(directory) / 'report-job.json').read_text())['metrics']['report-github-api-requests-per-run']
-            self.assertEqual(metric['value'], 1.0)
-            self.assertIn('1 gh api calls gave no request line', metric['detail'])
+        own = ['onebudgetspec-github-action', 'telemetry', '--metric', API_METRIC, '--input', '.telemetry/report-job.json']
+        catalog = [
+            ('reads', reported(1, 'gh api anything > /dev/null || exit 1;'), {}),
+            ('own-requests', own, {'unit': 'requests', 'threshold': 20}),
+            ('own-seconds', OWN, {'unit': 'seconds', 'threshold': 120}),
+        ]
+        self.repository.write('budgets.yaml', budgets_yaml(catalog))
+        environment = {'ONEVCS_GH': str(silent), 'JOURNEY_COUNTS': str(self.counts)}
+        job = self.base(self.repository.commit('catalog'), environment=environment)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        metric = job.saved('report-job.json')['metrics'][API_METRIC]
+        self.assertIsNone(metric['value'], 'no passing number stands in for an unknown count')
+        self.assertIn('no record of its requests', metric['unavailable'])
+        rows = job.rows()
+        self.assertIn('no record of its requests', rows['own-requests']['unavailable'])
+        self.assertNotIn('verdict', rows['own-requests'])
+        self.assertEqual(rows['own-seconds']['verdict'], 'within', 'a metric that is known still reports')
+        self.assertEqual(rows['reads']['verdict'], 'within')
+        # A known overrun under the same gap is still the ordinary failure.
+        self.repository.write('budgets.yaml', budgets_yaml([*catalog, ('over-budget', reported(500), {})]))
+        job = self.base(self.repository.commit('over'), environment=environment)
+        self.assertEqual(job.exit_code, 1, job.stdout)
+        self.assertEqual(job.rows()['over-budget']['verdict'], 'over')
+        self.assertIsNone(job.saved('report-job.json')['metrics'][API_METRIC]['value'])
+
+    def test_a_command_reading_github_through_curl_reconciles_at_the_boundary(self):
+        read = 'curl -fsS -H "Authorization: Bearer $GH_TOKEN" http://api.github.localhost/repos/owner/repo/commits/curl > /dev/null || exit 1;'
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('reads-with-curl', reported(1, read), {}),
+            ('reads-with-gh', reported(1, READS_REST), {}),
+        ]))
+        self.repository.commit('catalog')
+        self.host.clear_requests()
+        job = self.base()
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(self.executed(), ['reads-with-curl', 'reads-with-gh'])
+        self.assertEqual(job.rows()['reads-with-curl']['verdict'], 'within')
+        self.assertEqual(self.host.count('commits/curl'), 1)
+        self.assertEqual(self.host.requests_not_through_gh, 1, 'the boundary knows the client')
+        saved = job.saved('report-job.json')
+        self.assertEqual(saved['metrics'][API_METRIC]['value'] + self.host.requests_not_through_gh, self.host.count(''))
+        self.assertIn('only requests made through gh', saved['scope'])
+
+    def test_a_runaway_command_stops_at_the_process_limit(self):
+        # A chain of the kind the limit exists for: each link starts the next and waits for it.
+        script = Path(self.counts_directory.name) / 'runaway'
+        script.write_text('#!/usr/bin/env bash\nsleep 30 &\n"$0"\n')
+        script.chmod(0o755)
+        with self.assertRaisesRegex(AssertionError, 'ran away'):
+            harness.bounded_run([str(script)])
+
+    def test_a_gh_that_resolves_back_to_the_counter_cannot_loop(self):
+        looping = Path(self.counts_directory.name) / 'looping-gh'
+        looping.write_text('#!/usr/bin/env bash\nexec gh "$@"\n')
+        looping.chmod(0o755)
+        self.repository.write('budgets.yaml', budgets_yaml([('reads', ['bash', '-c', 'gh api repos/owner/repo/commits/a'], {})]))
+        job = self.base(self.repository.commit('catalog'), environment={'ONEVCS_GH': str(looping)})
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertIn('needs the GitHub CLI', job.rows()['reads']['unavailable'])
+
+    def test_plugin_follows_real_pages_and_every_page_is_counted(self):
+        self.own_catalog()
+        self.repository.commit('catalog')
+        first = self.base()
+        self.host.paged_artifacts = True
+        self.host.clear_requests()
+        routed = {'ONEVCS_GH': str(harness.ROUTE_API_ORIGIN), 'JOURNEY_COUNTS': str(self.counts)}
+        job = self.base(environment=routed)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(self.host.count(r'/artifacts\?'), 2, 'the listing took two real gh calls')
+        metric = job.saved('report-job.json')['metrics'][API_METRIC]
+        self.assertEqual(metric['value'], self.host.count(''))
+        self.assertIn('archive=4 (QueryCost 4)', metric['detail'])
+        # Provenance held across the pages: the unrelated artifact on the first was never read.
+        rolling = self.history_of(job.run_id)
+        self.assertEqual([run['head_sha'] for run in rolling['runs']], [first.sha, job.sha])
+        self.assertEqual(self.host.count('/artifacts/999/'), 0)
+        # A later page that fails: the baseline is unavailable, its request still counted.
+        self.host.refuse.append({'path': '&page=2$', 'status': 500, 'times': 5})
+        self.host.clear_requests()
+        failed = self.base(environment=routed)
+        self.assertEqual(failed.exit_code, 0, failed.stdout)
+        self.assertEqual(failed.saved('report-job.json')['metrics'][API_METRIC]['value'], self.host.count(''))
+        self.assertIn('could not list its artifacts', failed.markdown())
+        self.assertEqual(len(self.history_of(failed.run_id)['runs']), 1, 'a fresh history, nothing merged')
 
     def test_concurrent_pushes_never_merge_divergent_histories(self):
         self.catalog_one()
@@ -626,7 +699,7 @@ class History(Journey):
         with tempfile.TemporaryDirectory() as directory:
             self.host.clear_requests()
             head = self.repository.commit('next')
-            answer = subprocess.run(
+            answer = harness.bounded_run(
                 [str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--base-ref', 'main',
                  '--mode', 'base', '--workflow', str(harness.WORKFLOW), '--out', directory],
                 cwd=self.repository.path, capture_output=True, text=True, check=False,
@@ -637,7 +710,7 @@ class History(Journey):
             rolling = json.loads((Path(directory) / 'rolling-history.json').read_text())
             self.assertEqual([run['head_sha'] for run in rolling['runs']], [first.sha, head])
             # Without a token, the plugin is never asked; the report still stands.
-            answer = subprocess.run(
+            answer = harness.bounded_run(
                 [str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--base-ref', 'main',
                  '--mode', 'base', '--run-id', '123', '--out', directory],
                 cwd=self.repository.path, capture_output=True, text=True, check=False,
@@ -662,7 +735,7 @@ class DirectTool(Journey):
             saved.write_bytes(self.host.artifact_files(job.run_id)['rolling-history.json'])
             out = Path(directory) / 'out'
             head = self.repository.commit('next')
-            answer = subprocess.run(
+            answer = harness.bounded_run(
                 [str(driver), 'report', '--repo', 'owner/repo', '--base-ref', 'main', '--mode', 'base',
                  '--saved-history', str(saved), '--out', str(out)],
                 cwd=self.repository.path, capture_output=True, text=True, check=False,
@@ -709,13 +782,13 @@ class DirectTool(Journey):
             self.assertEqual(self.direct(driver, out, saved).returncode, 1)
 
             # Reproduction needs nothing but the saved file.
-            reproduced = subprocess.run([str(driver), 'reproduce', '--input', str(out / 'comparison-input.json')],
+            reproduced = harness.bounded_run([str(driver), 'reproduce', '--input', str(out / 'comparison-input.json')],
                                         cwd=directory, capture_output=True, text=True, check=False, env=clean_environment())
             self.assertEqual(reproduced.returncode, 1, reproduced.stderr)
             self.assertIn('steady', reproduced.stdout)
 
     def direct(self, driver, out, saved, *extra):
-        return subprocess.run(
+        return harness.bounded_run(
             [str(driver), 'report', '--repo', 'owner/repo', '--base-ref', 'main', '--mode', 'base',
              '--saved-history', str(saved), '--out', str(out), *extra],
             cwd=self.repository.path, capture_output=True, text=True, check=False,
@@ -743,19 +816,19 @@ class DirectTool(Journey):
                 (['--repo', 'owner/repo', '--mode', 'base'], 'base-ref'),
                 (['--repo', 'owner/repo', '--budget-files', '{'], 'valid glob'),
             ]:
-                answer = subprocess.run([str(driver), 'report', '--out', out, *arguments], cwd=self.repository.path,
+                answer = harness.bounded_run([str(driver), 'report', '--out', out, *arguments], cwd=self.repository.path,
                                         capture_output=True, text=True, check=False, env=clean_environment())
                 self.assertEqual(answer.returncode, 2, answer.stderr)
                 self.assertIn(reason, answer.stderr)
-            outside = subprocess.run([str(driver), 'report', '--out', out, '--repo', 'owner/repo'], cwd=directory,
+            outside = harness.bounded_run([str(driver), 'report', '--out', out, '--repo', 'owner/repo'], cwd=directory,
                                      capture_output=True, text=True, check=False, env=clean_environment())
             self.assertEqual(outside.returncode, 2)
             self.assertIn('checkout', outside.stderr)
-            missing = subprocess.run([str(driver), 'reproduce', '--input', 'absent.json'], cwd=directory,
+            missing = harness.bounded_run([str(driver), 'reproduce', '--input', 'absent.json'], cwd=directory,
                                      capture_output=True, text=True, check=False, env=clean_environment())
             self.assertEqual(missing.returncode, 2)
             self.assertIn('refused', missing.stderr)
-            unfinished = subprocess.run([str(driver), 'finish', '--out', str(Path(directory) / 'nothing')], cwd=directory,
+            unfinished = harness.bounded_run([str(driver), 'finish', '--out', str(Path(directory) / 'nothing')], cwd=directory,
                                         capture_output=True, text=True, check=False, env=clean_environment())
             self.assertEqual(unfinished.returncode, 1)
             self.assertIn('run the step that writes it first', unfinished.stderr)
@@ -769,11 +842,11 @@ class DirectTool(Journey):
             path.write_text(json.dumps({'schema_version': 1, 'labels': ['ci-report'],
                                         'metrics': {'report-github-api-requests-per-run': {'value': 12, 'detail': 'requests: commands=3'}}}))
             read = [str(driver), 'telemetry', '--metric', 'report-github-api-requests-per-run', '--input', str(path)]
-            answer = subprocess.run(read, capture_output=True, text=True, check=False,
+            answer = harness.bounded_run(read, capture_output=True, text=True, check=False,
                                     env={**clean_environment(), 'ONEBUDGETSPEC_RESULT': str(result)})
             self.assertEqual(answer.returncode, 0, answer.stderr)
             self.assertEqual(json.loads(result.read_text()), {'value': 12.0, 'detail': 'requests: commands=3'})
-            plain = subprocess.run(read, capture_output=True, text=True, check=False, env=clean_environment())
+            plain = harness.bounded_run(read, capture_output=True, text=True, check=False, env=clean_environment())
             self.assertIn('12 (requests: commands=3)', plain.stdout)
             for document, reason in [
                 ('not json', 'not JSON'),
@@ -782,11 +855,11 @@ class DirectTool(Journey):
                 (json.dumps({'schema_version': 1, 'labels': ['ci-report'], 'metrics': {}}), 'no finite metric'),
             ]:
                 path.write_text(document)
-                answer = subprocess.run(read, capture_output=True, text=True, check=False, env=clean_environment())
+                answer = harness.bounded_run(read, capture_output=True, text=True, check=False, env=clean_environment())
                 self.assertEqual(answer.returncode, 1)
                 self.assertIn(reason, answer.stderr)
             path.unlink()
-            answer = subprocess.run(read, capture_output=True, text=True, check=False, env=clean_environment())
+            answer = harness.bounded_run(read, capture_output=True, text=True, check=False, env=clean_environment())
             self.assertIn('cannot read', answer.stderr)
 
 
@@ -806,7 +879,7 @@ class Degraded(Journey):
         path.chmod(0o755)
 
     def direct(self, directory, *arguments, environment=None, cwd=None):
-        return subprocess.run(
+        return harness.bounded_run(
             [str(directory / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', *arguments],
             cwd=cwd or self.repository.path, capture_output=True, text=True, check=False,
             env={**clean_environment(), 'JOURNEY_COUNTS': str(self.counts), **(environment or {})})
@@ -896,11 +969,11 @@ class Degraded(Journey):
             self.assertEqual(phased.returncode, 0, phased.stderr)
             (out / 'report.md').unlink()
             (out / 'report.md').mkdir()
-            finish = subprocess.run([str(tools / 'onebudgetspec-github-action'), 'finish', '--out', directory],
+            finish = harness.bounded_run([str(tools / 'onebudgetspec-github-action'), 'finish', '--out', directory],
                                     cwd=self.repository.path, capture_output=True, text=True, check=False, env=clean_environment())
             self.assertEqual(finish.returncode, 1, 'the overrun the saved run already holds')
             (out / 'budget-run.json').unlink()
-            finish = subprocess.run([str(tools / 'onebudgetspec-github-action'), 'finish', '--out', directory],
+            finish = harness.bounded_run([str(tools / 'onebudgetspec-github-action'), 'finish', '--out', directory],
                                     cwd=self.repository.path, capture_output=True, text=True, check=False, env=clean_environment())
             self.assertEqual(finish.returncode, 1)
             self.assertIn('cannot read', finish.stderr)
@@ -960,16 +1033,16 @@ class Degraded(Journey):
             for tool in ('bash', 'git', 'env', 'cat'):
                 os.symlink(shutil.which(tool), essentials / tool)
             path = {'PATH': f'{tools}:{essentials}'}
-            answer = subprocess.run([str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha, '--out', str(Path(directory) / 'first')],
+            answer = harness.bounded_run([str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha, '--out', str(Path(directory) / 'first')],
                                     cwd=self.repository.path, capture_output=True, text=True, check=False, env={**clean_environment(), **path})
             self.assertEqual(answer.returncode, 0, answer.stderr)
             self.assertIn('no GitHub credential', answer.stdout)
             mode = ['--mode', 'base', '--base-ref', 'main', '--workflow', '1', '--saved-history', str(Path(directory) / 'none')]
-            answer = subprocess.run([str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha, '--out', str(Path(directory) / 'second'), *mode],
+            answer = harness.bounded_run([str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha, '--out', str(Path(directory) / 'second'), *mode],
                                     cwd=self.repository.path, capture_output=True, text=True, check=False, env={**clean_environment(), **path})
             self.assertEqual(answer.returncode, 0, answer.stderr)
             self.assertIn('needs the GitHub CLI', answer.stdout)
-            answer = subprocess.run([str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha, '--out', str(Path(directory) / 'second'), *mode],
+            answer = harness.bounded_run([str(tools / 'onebudgetspec-github-action'), 'report', '--repo', 'owner/repo', '--head-sha', sha, '--out', str(Path(directory) / 'second'), *mode],
                                     cwd=self.repository.path, capture_output=True, text=True, check=False,
                                     env={**clean_environment(), **path, 'ONEVCS_GH': '/nonexistent/gh'})
             self.assertEqual(answer.returncode, 3, 'nothing says the host refused it, so this stays an error')
@@ -987,7 +1060,7 @@ class Contract(unittest.TestCase):
         self.assertTrue(inputs['token']['required'])
         for spec in inputs.values():
             self.assertIn('description', spec)
-        help_text = subprocess.run([str(harness.driver_binary()), 'report', '--help'], capture_output=True, text=True, check=True).stdout
+        help_text = harness.bounded_run([str(harness.driver_binary()), 'report', '--help'], text=True).stdout
         run_script = (harness.ROOT / 'action/run.sh').read_text()
         readme = (harness.ROOT / 'README.md').read_text()
         for name, spec in inputs.items():

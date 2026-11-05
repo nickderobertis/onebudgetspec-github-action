@@ -82,8 +82,9 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
         &metrics,
         persistence,
     )?;
-    let (own, unwritable) = write_own_telemetry(own, &job_labels, &metrics, persistence);
-    let changed = !own.is_empty() || !unwritable.is_empty();
+    let (own, not_run) =
+        write_own_telemetry(own, &input.current, &job_labels, &metrics, persistence);
+    let changed = !own.is_empty() || !not_run.is_empty();
 
     let mut diagnostics: Vec<String> = continuation["diagnostics"]
         .as_array()
@@ -101,7 +102,7 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
     }
     let core_cli = tools::locate(tools::CORE)?;
     let current = &mut input.current;
-    for (id, reason) in unwritable {
+    for (id, reason) in not_run {
         if let Some(row) = current.unavailable.iter_mut().find(|row| row.id == id) {
             row.reason = reason;
         }
@@ -140,10 +141,11 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
     Ok(ExitCode::from(u8::try_from(exit_status).unwrap_or(1)))
 }
 
-/// Write the telemetry each own command reads. A command whose file cannot be written cannot
-/// run, which is its row's reason and nothing more.
+/// Write the telemetry each own command reads. A command whose file cannot be written, or whose
+/// figure could not be established, does not run: that is its row's reason and nothing more.
 fn write_own_telemetry(
     own: OwnInputs,
+    current: &BudgetRun,
     labels: &[String],
     metrics: &[Metric<'_>],
     persistence: &str,
@@ -151,6 +153,17 @@ fn write_own_telemetry(
     let mut writable = Vec::new();
     let mut unwritable = Vec::new();
     for (id, path) in own {
+        let unknown = current
+            .catalog
+            .iter()
+            .find(|budget| budget.id == id)
+            .and_then(|budget| catalog::own_metric(&budget.command))
+            .and_then(|name| metrics.iter().find(|metric| metric.name == name))
+            .and_then(|metric| metric.value.as_ref().err());
+        if let Some(reason) = unknown {
+            unwritable.push((id, reason.clone()));
+            continue;
+        }
         match telemetry::write(&path, labels, metrics, persistence) {
             Ok(()) => writable.push((id, path)),
             Err(failure) => {
@@ -232,18 +245,13 @@ fn metrics<'a>(
         .iter()
         .filter(|line| line["uninstrumented"] == true)
         .count();
-    let unread = if uninstrumented == 0 {
-        String::new()
-    } else {
-        format!(" ({uninstrumented} gh api calls gave no request line, each counted once)")
-    };
     let commands = reached("commands");
     let (workflow, history, delivery) =
         (reached("workflow"), reached("history"), reached("delivery"));
     let total = commands + workflow + history + delivery;
     let phases = Phases::from_json(&continuation["phases"]);
     let breakdown = format!(
-        "GitHub API requests (REST and GraphQL): commands={commands} workflow={workflow} archive={history} (QueryCost {}) delivery={delivery} including retries={retries}{unread}; artifact and storage transfers are not GitHub API requests and are not in this figure, main upload {main_upload}; seconds: install={:.2} check={:.2} archive={:.2} render={:.2} delivery={:.2}",
+        "GitHub API requests made through gh (REST and GraphQL): commands={commands} workflow={workflow} archive={history} (QueryCost {}) delivery={delivery} including retries={retries}; artifact and storage transfers are not GitHub API requests and are not in this figure, main upload {main_upload}; seconds: install={:.2} check={:.2} archive={:.2} render={:.2} delivery={:.2}",
         continuation["history_cost"],
         phases.install,
         phases.check,
@@ -253,14 +261,20 @@ fn metrics<'a>(
     );
     let mut metrics = vec![Metric {
         name: GITHUB_API_REQUESTS,
-        value: f64::from(u32::try_from(total).unwrap_or(u32::MAX)),
+        value: if uninstrumented == 0 {
+            Ok(f64::from(u32::try_from(total).unwrap_or(u32::MAX)))
+        } else {
+            Err(format!(
+                "gh gave no record of its requests on {uninstrumented} call(s), so this run's GitHub API request count cannot be established"
+            ))
+        },
         detail: breakdown.clone(),
     }];
     if let Some(stopped_at) = stopped_at {
         let started_at = continuation["started_at"].as_f64().unwrap_or(stopped_at);
         metrics.push(Metric {
             name: "report-command-seconds",
-            value: (stopped_at - started_at).max(0.0),
+            value: Ok((stopped_at - started_at).max(0.0)),
             detail: breakdown,
         });
     }

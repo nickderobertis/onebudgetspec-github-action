@@ -17,8 +17,10 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import tarfile
+import time
 import tempfile
 import threading
 import urllib.request
@@ -37,12 +39,48 @@ API_ORIGIN = 'http://api.github.localhost'
 _cached = {}
 
 
+# Real onevcs follows only `Link` URLs on the real API origin, so for a paged listing this routes
+# exactly that origin to the double and hands everything else to the real `gh` untouched.
+ROUTE_API_ORIGIN = Path(__file__).resolve().parent / 'route-api-origin'
+
+
+# No journey command legitimately comes near either limit. They exist so a mistake here, such as
+# a `gh` that runs itself, stops at a handful of processes on a host other work shares. A runaway
+# fails its journey. RLIMIT_NPROC cannot do this: it counts every process of the user, on any host.
+MAX_COMMAND_PROCESSES = 64
+MAX_COMMAND_SECONDS = 300
+
+
+def bounded_run(arguments, **options):
+    """`subprocess.run`, in its own process group, ended whole if it passes either limit."""
+    options.pop('capture_output', None)
+    options.pop('check', None)
+    text = options.pop('text', False)
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        process = subprocess.Popen(arguments, stdout=stdout, stderr=stderr, start_new_session=True, **options)
+        deadline = time.monotonic() + MAX_COMMAND_SECONDS
+        while process.poll() is None:
+            members = subprocess.run(['ps', '-A', '-o', 'pgid='], capture_output=True, text=True, check=False)
+            count = members.stdout.split().count(str(process.pid))
+            if count > MAX_COMMAND_PROCESSES or time.monotonic() > deadline:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+                raise AssertionError(f'{arguments} ran away: {count} processes after its limits; nothing else was signalled')
+            time.sleep(0.1)
+        stdout.seek(0)
+        stderr.seek(0)
+        out, err = stdout.read(), stderr.read()
+    if text:
+        out, err = out.decode(errors='replace'), err.decode(errors='replace')
+    return subprocess.CompletedProcess(arguments, process.returncode, out, err)
+
+
 def real_gh_environment(host_url, home):
     """What sends the real `gh` to the double, and never to GitHub, with an empty config."""
     if shutil.which('gh') is None:
         raise RuntimeError('the journeys drive the real GitHub CLI; install gh, then re-run')
     return {'GH_HOST': 'github.localhost', 'HTTP_PROXY': host_url, 'GH_CONFIG_DIR': str(Path(home) / 'gh-config'),
-            'GH_PROMPT_DISABLED': '1'}
+            'GH_PROMPT_DISABLED': '1', 'http_proxy': host_url, 'ROUTED_GH': shutil.which('gh')}
 
 
 def dependencies():
@@ -136,6 +174,8 @@ class Host:
         self.transfers = []
         self.pending_uploads = {}
         self.transient_finalize_failures = 0
+        self.paged_artifacts = False
+        self.requests_not_through_gh = 0
         self.runs = []
         self.artifacts = {}
         self.archives = {}
@@ -178,6 +218,7 @@ class Host:
         with self.lock:
             self.requests.clear()
             self.transfers.clear()
+            self.requests_not_through_gh = 0
 
     def transferred(self, service):
         """How many file-transfer requests one service received."""
@@ -229,6 +270,8 @@ class Host:
             return self.reply(handler, 200, self.archives[objects[1]])
         with self.lock:
             self.requests.append((handler.command, path))
+            if not handler.headers.get('User-Agent', '').startswith('GitHub CLI'):
+                self.requests_not_through_gh += 1
             for rule in self.refuse:
                 if re.search(rule['path'], path) and rule['times'] > 0:
                     rule['times'] -= 1
@@ -279,7 +322,13 @@ class Host:
             return self.reply(handler, 200, json.dumps({'workflow_runs': self.runs}).encode())
         listed = re.fullmatch(r'/repos/owner/repo/actions/runs/(\d+)/artifacts', clean)
         if listed:
-            return self.reply(handler, 200, json.dumps({'artifacts': self.artifacts.get(listed[1], [])}).encode())
+            artifacts = self.artifacts.get(listed[1], [])
+            if self.paged_artifacts and 'page=2' not in path:
+                # The first page holds only an unrelated artifact; the one wanted is on the second.
+                unrelated = [{'id': 999, 'name': 'unrelated', 'size_in_bytes': 1, 'expired': False}]
+                link = f'<https://api.github.com{clean}?per_page=100&page=2>; rel="next"'
+                return self.reply(handler, 200, json.dumps({'artifacts': unrelated}).encode(), [('Link', link)])
+            return self.reply(handler, 200, json.dumps({'artifacts': artifacts}).encode())
         archive = re.fullmatch(r'/repos/owner/repo/actions/artifacts/(\d+)/zip', clean)
         if archive:
             return self.reply(handler, 302, b'', [('Location', self.url + '/objects/' + archive[1])])
@@ -537,8 +586,8 @@ class Job:
             'ACTIONS_RESULTS_URL': self.host.url + '/',
             **{f'INPUT_{name.upper()}': value for name, value in arguments.items()},
         }
-        result = subprocess.run(['node', str(entry)], cwd=self.repository.path, env=environment,
-                                capture_output=True, text=True, check=False)
+        result = bounded_run(['node', str(entry)], cwd=self.repository.path, env=environment,
+                             capture_output=True, text=True, check=False)
         self.stdout += result.stdout + result.stderr
         return ('success' if result.returncode == 0 else 'failure'), {}
 
@@ -560,7 +609,7 @@ class Job:
             environment['LLVM_PROFILE_FILE'] = os.environ['LLVM_PROFILE_FILE']
         for key, value in step.get('env', {}).items():
             environment[key] = expression.substitute(value)
-        result = subprocess.run(
+        result = bounded_run(
             ['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', expression.substitute(step['run'])],
             cwd=self.repository.path, env=environment, capture_output=True, text=True, check=False)
         self.stdout += result.stdout + result.stderr

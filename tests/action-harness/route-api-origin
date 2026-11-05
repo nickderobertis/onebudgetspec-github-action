@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# The real gh (ROUTED_GH, whose path cannot resolve back to a proxy), with the real API origin
+# routed to the doubled service. Only the journey that
+# needs onevcs to follow a real `Link` uses this.
+set -euo pipefail
+arguments=()
+for argument in "$@"; do
+  arguments+=("${argument/#https:\/\/api.github.com\//http:\/\/api.github.localhost\/}")
+done
+exec "$ROUTED_GH" "${arguments[@]}"

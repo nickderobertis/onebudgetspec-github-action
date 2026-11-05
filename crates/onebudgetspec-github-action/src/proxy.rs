@@ -21,6 +21,8 @@ const REAL: &str = "BUDGET_PROXY_REAL_GH";
 const LOG: &str = "BUDGET_PROXY_LOG";
 /// Which part of the run is calling.
 const PHASE: &str = "BUDGET_PROXY_PHASE";
+/// Set on what the proxy forwards to, so a `gh` that resolves back to it cannot loop.
+const FORWARDING: &str = "BUDGET_PROXY_FORWARDING";
 /// Set when budget commands get no GitHub credential in this run.
 const DENY: &str = "BUDGET_PROXY_DENY";
 /// A `Retry-After` longer than this is not waited for, so one job cannot be parked.
@@ -149,6 +151,13 @@ pub fn real_gh() -> Option<OsString> {
 
 /// The proxy's own entry point.
 pub fn run() -> ExitCode {
+    if std::env::var_os(FORWARDING).is_some() {
+        append(&unreached(Outcome::NoGh));
+        eprintln!(
+            "gh: the GitHub CLI this forwards to runs this proxy again; point ONEVCS_GH at the real gh"
+        );
+        return ExitCode::from(127);
+    }
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
     let is_api = arguments.first().is_some_and(|verb| verb == "api");
     let local_only = arguments.first().is_none_or(|verb| {
@@ -202,9 +211,8 @@ fn record(exchanges: &[String], classified: &Classified, is_api: bool, retried: 
         return;
     }
     if is_api && classified.outcome == Outcome::Answered {
-        // `gh api` answered, so it sent at least this one request, in a form this cannot read.
+        // `gh api` answered without saying what it sent, so the run's count cannot be known.
         let mut line = unreached(Outcome::Answered);
-        line["reached"] = json!(true);
         line["uninstrumented"] = json!(true);
         append(&line);
     } else if classified.outcome != Outcome::Answered {
@@ -249,6 +257,7 @@ fn forward(real: &OsString, arguments: &[OsString]) -> Output {
     let mut command = Command::new(real);
     command
         .args(arguments)
+        .env(FORWARDING, "1")
         // Forced colour would wrap the lines this reads in escape codes.
         .env("NO_COLOR", "1")
         .env_remove("CLICOLOR_FORCE");
@@ -387,10 +396,13 @@ pub fn read_log(path: &Path) -> Vec<Value> {
 /// Why `budget`'s failed measurement says nothing about the budget: its GitHub read was
 /// refused or impossible, which is missing input rather than a measurement.
 pub fn blocked_reason(log: &[Value], budget: &str) -> Option<String> {
-    let line = log
-        .iter()
+    log.iter()
         .rev()
-        .find(|line| line["budget"] == budget && line["outcome"] != Outcome::Answered.as_str())?;
+        .filter(|line| line["budget"] == budget)
+        .find_map(blocked_line_reason)
+}
+
+fn blocked_line_reason(line: &Value) -> Option<String> {
     match Outcome::parse(line["outcome"].as_str()?)? {
         Outcome::RateLimited => Some(format!(
             "GitHub refused its read for a rate limit (HTTP {}): measurement unavailable",
