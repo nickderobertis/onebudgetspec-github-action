@@ -136,7 +136,7 @@ Linux/macOS, with the install journey also on Windows. Dependencies upgrade thro
 Action journeys run `action.yml`'s own steps with the real driver, plugin, core, onevcs and `gh`; only the GitHub service, the
 release host and the package index are doubled (`just test-e2e`). The first run builds the published plugin into
 `target/action-tools` and fetches the core wheel. `report-job:test` records the job's request figure, which
-`action-report-rest-requests-per-run` in [.github/reporting/budgets.yaml](.github/reporting/budgets.yaml) reads back.
+`action-report-github-api-requests-per-run` in [.github/reporting/budgets.yaml](.github/reporting/budgets.yaml) reads back.
 
 ## Credentials and releases
 

@@ -1,4 +1,4 @@
-"""Record one complete report job's traffic, for `action-report-rest-requests-per-run`.
+"""Record one complete report job's traffic, for `action-report-github-api-requests-per-run`.
 
 The workload: 100 budget rows, a rolling file of 20 commits, every runnable command's reads and a
 retried rate-limit response, through action.yml's real steps with only external services doubled.
