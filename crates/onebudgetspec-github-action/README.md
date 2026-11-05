@@ -83,8 +83,10 @@ so an unrelated commit cannot enter. Below five samples a row has no baseline, a
 `report-github-api-requests-per-run` counts GitHub API requests, REST and GraphQL with retries and pages. Every `gh` command
 of a job, any verb and budget commands included, passes through a proxy that reads `gh`'s own one-line record of each HTTP
 exchange, and the plugin's own `QueryCost` is shown beside it. That is all a live job can see, so its saved figure covers
-requests made through `gh`, and its telemetry says other clients are not seen; if `gh` gives no such record, the figure is
-unavailable with that reason, never estimated. The budget's verdict comes from `report-job:test`, measured at the external
+requests made through `gh`, and its telemetry says other clients are not seen. If `gh api` gives no such record, whether it
+succeeded or failed, the figure is unavailable with that reason, never estimated. A successful verb other than `api` that
+gives none, such as `gh repo view`, cannot be told apart from a local command such as `gh auth token`, so it counts as zero,
+and the telemetry says that too. The budget's verdict comes from `report-job:test`, measured at the external
 boundary, which includes every client.
 It is not every HTTP operation. Artifact-service, blob, object-storage, release and index transfers are a different
 allowance. A job cannot see them, since `upload-artifact` is another process, so its saved telemetry leaves them out and

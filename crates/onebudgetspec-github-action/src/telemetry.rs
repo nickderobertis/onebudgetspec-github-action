@@ -10,9 +10,9 @@ use crate::state::Failure;
 /// The label proving a telemetry file is a report job's own.
 pub const JOB_LABEL: &str = "ci-report";
 
-/// What a live job's request figure covers. Only an external boundary sees every client.
-const SCOPE: &str =
-    "only requests made through gh are counted here; requests from any other client are not seen";
+/// What a live job's request figure covers. Only an external boundary sees every client, and
+/// `gh`'s own record cannot tell a silent request from a local command.
+const SCOPE: &str = "only requests made through gh are counted here; requests from any other client are not seen; a gh verb other than api that shows no request line counts as zero, since it cannot be told apart from a local command such as gh auth token";
 
 /// One metric as a budget reports it.
 pub struct Metric<'a> {

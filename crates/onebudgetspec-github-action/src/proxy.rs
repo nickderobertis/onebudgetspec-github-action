@@ -191,7 +191,10 @@ pub fn run() -> ExitCode {
 }
 
 /// Log one invocation's exchanges with the GitHub API: its outcome belongs to the last one,
-/// since `gh` stops at the first it cannot go on from. An invocation that sent nothing leaves
+/// since `gh` stops at the first it cannot go on from. `gh api` always means to reach the host,
+/// so one that shows no exchange at all, answered or failed, leaves the run's count unknowable.
+/// Any other verb showing none may be a local command like `gh auth token`, which cannot be told
+/// from a request made silently, so it counts as zero and the telemetry's scope says so; it leaves
 /// a line only when it failed, because that failure may be why a measurement has no value.
 fn record(exchanges: &[String], classified: &Classified, is_api: bool, retried: bool) {
     let api: Vec<&String> = exchanges.iter().filter(|url| is_api_url(url)).collect();
@@ -210,14 +213,19 @@ fn record(exchanges: &[String], classified: &Classified, is_api: bool, retried: 
     if !api.is_empty() {
         return;
     }
-    if is_api && classified.outcome == Outcome::Answered {
-        // `gh api` answered without saying what it sent, so the run's count cannot be known.
-        let mut line = unreached(Outcome::Answered);
-        line["uninstrumented"] = json!(true);
-        append(&line);
+    if is_api && exchanges.is_empty() {
+        append(&uninstrumented(classified.outcome));
     } else if classified.outcome != Outcome::Answered {
         append(&unreached(classified.outcome));
     }
+}
+
+/// A log line for a `gh api` invocation that gave no record of what it sent. It keeps how the
+/// invocation ended, since that may still be why a measurement has no value.
+fn uninstrumented(outcome: Outcome) -> Value {
+    let mut line = unreached(outcome);
+    line["uninstrumented"] = json!(true);
+    line
 }
 
 /// Object storage behind a redirect is a file transfer, not a GitHub API request.
@@ -267,6 +275,9 @@ fn forward(real: &OsString, arguments: &[OsString]) -> Output {
     match command.output() {
         Ok(output) => output,
         Err(error) => {
+            if arguments.first().is_some_and(|verb| verb == "api") {
+                append(&uninstrumented(Outcome::Failed));
+            }
             eprintln!("gh: cannot run the GitHub CLI: {error}");
             std::process::exit(127);
         }

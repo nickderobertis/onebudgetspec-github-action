@@ -570,6 +570,89 @@ class History(Journey):
         self.assertEqual(job.rows()['over-budget']['verdict'], 'over')
         self.assertIsNone(job.saved('report-job.json')['metrics'][API_METRIC]['value'])
 
+    def gh_answering(self, cases):
+        """A `gh` that answers the shell `cases` itself and hands anything else to the real one."""
+        script = Path(self.counts_directory.name) / 'selective-gh'
+        script.write_text(f'#!/usr/bin/env bash\ncase "$*" in\n{cases}\nesac\nexec "{harness.ROUTE_API_ORIGIN}" "$@"\n')
+        script.chmod(0o755)
+        return {'ONEVCS_GH': str(script), 'JOURNEY_COUNTS': str(self.counts)}
+
+    def test_a_failed_gh_api_call_with_no_request_line_is_unavailable_too(self):
+        # Only these calls are silent, so everything else the job sends is a countable number.
+        environment = self.gh_answering("""
+            *commits/silent-failure*) echo 'gh: something went wrong' >&2; exit 1 ;;
+            *commits/silent-limit*) echo 'gh: API rate limit exceeded (HTTP 429)' >&2; exit 1 ;;""")
+        own = ['onebudgetspec-github-action', 'telemetry', '--metric', API_METRIC, '--input', '.telemetry/report-job.json']
+        catalog = [
+            ('counted', reported(1, READS_REST), {}),
+            ('own-requests', own, {'unit': 'requests', 'threshold': 20}),
+        ]
+        self.repository.write('budgets.yaml', budgets_yaml(catalog))
+        job = self.base(self.repository.commit('control'), environment=environment)
+        self.assertEqual(job.saved('report-job.json')['metrics'][API_METRIC]['value'], self.host.count(''),
+                         'with every gh api call on record the same job has its number')
+        for budget, read, expectation in (
+            ('tolerates-failure', 'gh api repos/owner/repo/commits/silent-failure > /dev/null 2>&1 || true;', 'within'),
+            ('fails', 'gh api repos/owner/repo/commits/silent-failure > /dev/null || exit 1;', 'error'),
+        ):
+            with self.subTest(budget):
+                self.repository.write('budgets.yaml', budgets_yaml([*catalog, (budget, reported(1, read), {'labels': ['provisional']})]))
+                job = self.base(self.repository.commit(budget), environment=environment)
+                self.assertEqual(job.exit_code, 0, job.stdout)
+                metric = job.saved('report-job.json')['metrics'][API_METRIC]
+                self.assertIsNone(metric['value'], 'no number stands in for an unknown count')
+                self.assertIn('no record of its requests', metric['unavailable'])
+                rows = job.rows()
+                self.assertEqual(rows[budget]['verdict'], expectation)
+                self.assertIn('no record of its requests', rows['own-requests']['unavailable'])
+                self.assertNotIn('verdict', rows['own-requests'])
+                self.assertEqual(rows['counted']['verdict'], 'within')
+        # How the call ended still explains the budget it starved.
+        limited = reported(1, 'gh api repos/owner/repo/commits/silent-limit > /dev/null || exit 1;')
+        self.repository.write('budgets.yaml', budgets_yaml([*catalog, ('limited', limited, {})]))
+        job = self.base(self.repository.commit('limited'), environment=environment)
+        self.assertIn('rate limit', job.rows()['limited']['unavailable'])
+        self.assertIsNone(job.saved('report-job.json')['metrics'][API_METRIC]['value'])
+
+    def test_a_gh_that_cannot_start_gives_no_record_either(self):
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('tolerates-failure', reported(1, 'gh api repos/owner/repo/commits/a > /dev/null 2>&1 || true;'), {}),
+        ]))
+        job = self.base(self.repository.commit('catalog'), environment={'ONEVCS_GH': '/nonexistent/gh', 'JOURNEY_COUNTS': str(self.counts)})
+        metric = job.saved('report-job.json')['metrics'][API_METRIC]
+        self.assertIsNone(metric['value'], job.stdout)
+        self.assertIn('no record of its requests', metric['unavailable'])
+
+    def test_other_verbs_with_no_request_line_count_as_zero_and_the_telemetry_says_so(self):
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('local-verb', reported(1, 'gh auth token > /dev/null || exit 1;'), {}),
+            ('silent-verb', reported(1, 'gh repo view owner/repo > /dev/null || exit 1;'), {}),
+            ('reads', reported(1, READS_REST), {}),
+        ]))
+        environment = self.gh_answering('repo\\ view*) echo \'{}\'; exit 0 ;;')
+        self.repository.commit('catalog')
+        self.host.clear_requests()
+        job = self.base(environment=environment)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual({row: job.rows()[row]['verdict'] for row in ('local-verb', 'silent-verb', 'reads')},
+                         dict.fromkeys(('local-verb', 'silent-verb', 'reads'), 'within'))
+        saved = job.saved('report-job.json')
+        self.assertEqual(saved['metrics'][API_METRIC]['value'], self.host.count(''), 'neither verb adds to the count')
+        self.assertIn('other than api that shows no request line counts as zero', saved['scope'])
+        self.assertIn('requests from any other client are not seen', saved['scope'])
+
+    def test_a_gh_api_call_that_shows_only_a_storage_transfer_is_on_record(self):
+        environment = self.gh_answering("""
+            *commits/storage*) echo '* Request to https://objects.example.test/blob' >&2; echo '{}'; exit 0 ;;""")
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('transfer', reported(1, 'gh api repos/owner/repo/commits/storage > /dev/null || exit 1;'), {}),
+        ]))
+        self.repository.commit('catalog')
+        self.host.clear_requests()
+        job = self.base(environment=environment)
+        metric = job.saved('report-job.json')['metrics'][API_METRIC]
+        self.assertEqual(metric['value'], self.host.count(''), 'a transfer is neither a request nor an unknown')
+
     def test_a_command_reading_github_through_curl_reconciles_at_the_boundary(self):
         read = 'curl -fsS -H "Authorization: Bearer $GH_TOKEN" http://api.github.localhost/repos/owner/repo/commits/curl > /dev/null || exit 1;'
         self.repository.write('budgets.yaml', budgets_yaml([
