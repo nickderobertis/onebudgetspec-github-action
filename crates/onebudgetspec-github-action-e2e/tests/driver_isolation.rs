@@ -15,6 +15,7 @@ const PROBE_MODE: &str = "E2E_DRIVER_ISOLATION_PROBE";
 const PROBES: usize = 4;
 const SPAWNS_PER_PROBE: usize = 200;
 const DEADLINE: Duration = Duration::from_secs(300);
+const ABSENT_FOR: Duration = Duration::from_millis(100);
 const TEST_NAME: &str = "a_sibling_build_in_the_same_target_never_takes_the_driver_away";
 
 /// This toolchain and a workspace to build, with no coverage flags or target override from the run.
@@ -129,6 +130,10 @@ fn a_sibling_build_in_the_same_target_never_takes_the_driver_away() {
             while !stop.load(Ordering::Relaxed) {
                 sibling_build(scratch);
                 std::fs::remove_file(&uplifted).expect("the sibling's binary is there");
+                // Long enough for a spawn to land here, not only on the half-written copy after.
+                std::thread::sleep(ABSENT_FOR);
+                // Never copied over a link another build made meanwhile: that would rewrite deps/.
+                let _ = std::fs::remove_file(&uplifted);
                 std::fs::copy(&original, &uplifted).expect("copy the sibling's binary back");
                 rewrites.fetch_add(1, Ordering::Relaxed);
             }
