@@ -21,7 +21,7 @@ budgets:
   steps:
     - uses: actions/checkout@v5
       with: { fetch-depth: 0 }
-    - uses: nickderobertis/onebudgetspec-github-action@v0
+    - uses: nickderobertis/onebudgetspec-github-action@v0.2.0
       with:
         token: ${{ github.token }}
 ```

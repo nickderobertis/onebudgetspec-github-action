@@ -7,6 +7,9 @@ use serde_json::{Map, Value, json};
 use crate::cli::TelemetryArgs;
 use crate::state::Failure;
 
+/// The label proving a telemetry file is a report job's own.
+pub const JOB_LABEL: &str = "ci-report";
+
 /// One metric as a budget reports it.
 pub struct Metric<'a> {
     /// The key a budget's `--metric` names.

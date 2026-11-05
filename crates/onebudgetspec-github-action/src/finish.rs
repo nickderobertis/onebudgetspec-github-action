@@ -64,7 +64,7 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
             .map_err(|error| Failure::output(format!("saved comparison input: {error}")))?;
     let own = own_inputs(&continuation, &input.current);
     let phased = continuation["phased"].as_bool().unwrap_or(false);
-    let job_labels: Vec<String> = continuation["job_labels"]
+    let mut job_labels: Vec<String> = continuation["job_labels"]
         .as_array()
         .map(|labels| {
             labels
@@ -73,6 +73,10 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
                 .collect()
         })
         .unwrap_or_default();
+    // The reader's default, so a repository's own `labels` cannot strand its telemetry budgets.
+    if !job_labels.iter().any(|label| label == telemetry::JOB_LABEL) {
+        job_labels.push(telemetry::JOB_LABEL.to_owned());
+    }
     let uploads = u32::from(phased) * (1 + u32::from(!own.is_empty()));
     let metrics = metrics(&continuation, &wiring.log, stopped_at, uploads);
     telemetry::write(&out.join(file::TELEMETRY), &job_labels, &metrics)?;

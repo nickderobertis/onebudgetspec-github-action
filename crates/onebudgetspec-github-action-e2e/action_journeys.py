@@ -123,6 +123,8 @@ class Lifecycle(Journey):
         head = self.repository.commit('a change that regresses')
         job = self.pull_request(head, base_sha, draft=True)
 
+        # Both events save the identical format.
+        self.assertEqual(set(job.saved('budget-run.json')), set(json.loads(files['budget-run.json'])))
         # A draft on the same path: every runnable budget ran exactly once, unlabelled ones too.
         self.assertEqual(self.executed(), sorted(
             ['requests-read', 'bundle-bytes', 'coverage-percent', 'walltime', 'enforced-limit', 'shadow-limit']))
@@ -497,6 +499,14 @@ class History(Journey):
         self.assertEqual(len(self.history_of(job.run_id)['runs']), 1)
         self.assertIn('names other/repo', job.markdown())
         self.assertIn('starts fresh', job.markdown())
+        # A file that does not end at its own run's head is refused whole too.
+        document = json.loads(self.host.artifact_files(job.run_id)['rolling-history.json'])
+        document['runs'][-1]['attempt'] = 9
+        self.host.artifacts[str(job.run_id)] = []
+        self.host.attach(job.run_id, 'budget-results', zipped({'rolling-history.json': json.dumps(document)}))
+        job = self.base()
+        self.assertEqual(len(self.history_of(job.run_id)['runs']), 1)
+        self.assertIn('not this run', job.markdown())
         # Wrong branch and wrong workflow runs are ignored: the host lists them, onevcs refuses them.
         self.host.add_run(77001, job.sha, branch='other')
         self.host.add_run(77002, job.sha, workflow=7)
@@ -621,6 +631,15 @@ class DirectTool(Journey):
              '--saved-history', str(saved), '--out', str(out), *extra],
             cwd=self.repository.path, capture_output=True, text=True, check=False,
             env={**clean_environment(), 'JOURNEY_COUNTS': str(self.counts)})
+
+    def test_custom_job_labels_keep_the_telemetry_readable(self):
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('own-seconds', OWN, {'unit': 'seconds', 'threshold': 120}),
+        ]))
+        job = self.base(self.repository.commit('catalog'), inputs={'token': 'real-token', 'labels': 'our-job'})
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(job.rows()['own-seconds']['verdict'], 'within')
+        self.assertEqual(sorted(job.saved('report-job.json')['labels']), ['ci-report', 'our-job'])
 
     def test_refusals_name_the_problem(self):
         self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(5), {})]))
