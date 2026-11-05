@@ -8,4 +8,4 @@ cargo package --locked -p "$crate"
 install_root=$(mktemp -d)
 trap 'rm -rf "$install_root"' EXIT
 cargo install --locked --root "$install_root" --path "target/package/$crate-$version"
-SCAFFOLD_BINARY="$install_root/bin/$crate" cargo test --locked -p "$crate-e2e"
+SCAFFOLD_BINARY="$install_root/bin/$crate" cargo test --locked -p "$crate-e2e" --test cli

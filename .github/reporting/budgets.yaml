@@ -1,0 +1,13 @@
+schema_version: 1
+budgets:
+  - id: action-report-rest-requests-per-run
+    description: >-
+      Budget job REST requests per run: one complete PR or base job with 100 budget rows, one rolling
+      file of 20 commits, every runnable ordinary command's reads and transport retries counted.
+      Provisional design arithmetic: 8 report transport calls and 12 ordinary-command calls.
+    labels: [ci-report]
+    measure: reported
+    command: [onebudgetspec-github-action, telemetry, --metric, report-rest-requests-per-run, --input, .telemetry/report-job.json]
+    unit: requests
+    direction: max
+    threshold: 20

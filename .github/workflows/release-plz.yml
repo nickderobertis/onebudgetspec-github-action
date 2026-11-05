@@ -1,3 +1,6 @@
+# Conventional Commits on main drive the release: this tags and cuts the GitHub Release for a
+# merged release pull request, then opens the next one and arms its auto-merge. The GitHub
+# Release fires release.yml, which publishes; nothing here touches a registry.
 name: release-plz
 
 on:
@@ -16,16 +19,12 @@ jobs:
       group: release-plz-release
       cancel-in-progress: false
     steps:
-      - name: Require the release secrets
+      - name: Require the release secret
         env:
           RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          missing=""
-          [ -n "$RELEASE_PLZ_TOKEN" ] || missing="$missing RELEASE_PLZ_TOKEN"
-          [ -n "$CARGO_REGISTRY_TOKEN" ] || missing="$missing CARGO_REGISTRY_TOKEN"
-          if [ -n "$missing" ]; then
-            echo "::error::release-plz needs the repository secret(s):$missing (Settings → Secrets and variables → Actions)." >&2
+          if [ -z "$RELEASE_PLZ_TOKEN" ]; then
+            echo "::error::release-plz needs the repository secret RELEASE_PLZ_TOKEN (Settings → Secrets and variables → Actions)." >&2
             exit 1
           fi
       - name: Is this push a merged release pull request?
@@ -49,11 +48,10 @@ jobs:
         if: steps.release-pr.outputs.merged == 'true'
         with:
           tool: release-plz
-      - name: Publish, tag and cut the GitHub Release
+      - name: Tag and cut the GitHub Release
         if: steps.release-pr.outputs.merged == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: release-plz release --config release-plz.toml --git-token "$GITHUB_TOKEN"
 
   release-pr:
@@ -77,3 +75,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
         run: release-plz release-pr --config release-plz.toml --git-token "$GITHUB_TOKEN"
+      # Under the release PAT so the merge fires main's workflows; --auto waits for every
+      # required check, and a merge already armed or under way is not a broken release.
+      - name: Arm auto-merge on the release pull request
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName --jq 'map(select(.headRefName | startswith("release-plz-"))) | .[0].number // empty')"
+          if [ -n "$pr" ]; then
+            gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --auto --squash --delete-branch \
+              || echo "::warning::could not arm auto-merge on #$pr (already armed, or already merging)"
+          fi

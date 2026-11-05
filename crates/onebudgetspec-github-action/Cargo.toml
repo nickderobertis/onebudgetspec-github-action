@@ -6,9 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Scaffold for onebudgetspec GitHub Actions integration and direct tooling"
+description = "Run onebudgetspec budget reports from GitHub Actions or the command line"
 readme = "README.md"
 include = ["src/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[dependencies]
+chrono.workspace = true
+clap.workspace = true
+globset.workspace = true
+onebudgetspec-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

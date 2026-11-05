@@ -1,0 +1,45 @@
+# The one budgets job, added to a repository's existing workflow: after its predecessors, on every
+# pull request and base push. It adds no build or test of its own. `uses:` pins a released version.
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "true"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "true"
+
+  budgets:
+    needs: [build, test]
+    # Runs whatever its predecessors did, so a failed test still gets its budget report.
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    # One writer per pull request: the host has no atomic comment create.
+    concurrency:
+      group: budget-report-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: false
+    steps:
+      # Full history: local git proves each saved base commit's ancestry.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: nickderobertis/onebudgetspec-github-action@v0
+        with:
+          token: ${{ github.token }}
