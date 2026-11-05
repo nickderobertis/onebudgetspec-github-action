@@ -107,6 +107,7 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
             row.reason = reason;
         }
     }
+    let mut own_check_exit = None;
     if changed {
         let ids: BTreeSet<&str> = own.iter().map(|(id, _)| id.as_str()).collect();
         let checked = report::check_partitioned(
@@ -117,6 +118,7 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
             &current.enforcement_exclude_labels,
             report::deny_of(&continuation),
         );
+        own_check_exit = checked.invocation_exit;
         current
             .unavailable
             .retain(|row| !ids.contains(row.id.as_str()));
@@ -133,6 +135,7 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
         .as_i64()
         .and_then(|code| i32::try_from(code).ok())
         .filter(|code| *code != 0)
+        .or(own_check_exit)
         .unwrap_or_else(|| compared.exit_code());
     if phased {
         writeln!(std::io::stdout().lock(), "final-upload={changed}")

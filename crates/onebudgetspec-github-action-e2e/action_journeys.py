@@ -973,6 +973,21 @@ class Degraded(Journey):
             self.assertIn('ordinary check could not run', report['rows'][0]['unavailable'])
             self.assertFalse((Path(out) / 'rolling-history.json').exists(), 'incomplete results are never appended')
 
+    def test_an_own_telemetry_check_with_no_report_is_never_a_success(self):
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('steady', reported(5), {}),
+            ('own-seconds', OWN, {'unit': 'seconds', 'threshold': 120}),
+        ]))
+        real, directory = self.tools()
+        # llmlint: ignore[e2e_not_mocked] the real core always writes a readable report when it exits zero, so only a scripted core can reach this refusal; every other core call, and the driver's whole first phase, stays real.
+        self.script(directory / 'onebudgetspec', f'[ "$1" = check ] && [[ "$*" == *own-seconds* ]] && {{ echo broken; exit 0; }}\nexec "{real}/onebudgetspec" "$@"\n')
+        with tempfile.TemporaryDirectory() as out:
+            answer = self.direct(directory, '--base-ref', 'main', '--mode', 'base', '--workflow', '1', '--out', out)
+            self.assertEqual(answer.returncode, 3, answer.stderr)
+            rows = {row['id']: row for row in json.loads((Path(out) / 'comparison-report.json').read_text())['rows']}
+            self.assertIn('ordinary check could not run', rows['own-seconds']['unavailable'])
+            self.assertEqual(rows['steady']['verdict'], 'within', 'the first phase saw real results')
+
     def test_tools_missing_or_answering_nonsense_are_reasons(self):
         self.repository.write('budgets.yaml', budgets_yaml([('over-budget', reported(500), {})]))
         real, directory = self.tools()
