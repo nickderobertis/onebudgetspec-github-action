@@ -10,10 +10,10 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tests/action-harness'))
-import yaml  # noqa: E402
+import yaml
 
-import harness  # noqa: E402
-from harness import Host, Job, Repository, budgets_yaml, event_pull_request  # noqa: E402
+import harness
+from harness import Host, Job, Repository, budgets_yaml, event_pull_request
 
 COUNT = 'echo "$ONEBUDGETSPEC_BUDGET_ID" >> "$JOURNEY_COUNTS";'
 

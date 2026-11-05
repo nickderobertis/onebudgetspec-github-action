@@ -11,8 +11,8 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / 'tests/action-harness'))
-import harness  # noqa: E402
-from harness import Host, Job, Repository, budgets_yaml, event_pull_request  # noqa: E402
+import harness
+from harness import Host, Job, Repository, budgets_yaml, event_pull_request
 
 ROWS = 100
 COMMANDS_READING_REST = 10
