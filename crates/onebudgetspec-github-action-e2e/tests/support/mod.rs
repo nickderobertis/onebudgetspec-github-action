@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 
 /// The executable to drive.
 pub fn binary() -> PathBuf {
-    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    static BUILT: std::sync::OnceLock<(PathBuf, std::fs::File)> = std::sync::OnceLock::new();
     if let Some(path) = std::env::var_os("SCAFFOLD_BINARY") {
         return path.into();
     }
-    let path = BUILT.get_or_init(|| {
+    let (path, _) = BUILT.get_or_init(|| {
         let exe = std::env::current_exe().expect("the test executable's path");
         let profile_dir = exe
             .parent()
@@ -17,6 +17,12 @@ pub fn binary() -> PathBuf {
             "onebudgetspec-github-action{}",
             std::env::consts::EXE_SUFFIX
         ));
+        // On macOS cargo copies this binary out of deps/, so even an up-to-date build removes
+        // and re-copies it. A sibling test process's build must not run while this one spawns
+        // it: build alone, then keep a shared lock until this process exits.
+        let lock = std::fs::File::create(profile_dir.join("e2e-driver.lock"))
+            .expect("the driver's build lock is creatable under the target directory");
+        lock.lock().expect("the driver's build lock is takeable");
         {
             let target_dir = profile_dir.parent().expect("<target>/<profile>");
             let mut build = std::process::Command::new(env!("CARGO"));
@@ -44,7 +50,9 @@ pub fn binary() -> PathBuf {
                 path.display()
             );
         }
-        path
+        lock.lock_shared()
+            .expect("the driver's build lock can be shared");
+        (path, lock)
     });
     path.clone()
 }

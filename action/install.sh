@@ -30,15 +30,14 @@ curl -fsSL --retry 2 -o "$archive" "$base/v$version/$archive" \
   || fail "cannot download $archive from release v$version"
 curl -fsSL --retry 2 -o SHA256SUMS "$base/v$version/SHA256SUMS" \
   || fail "cannot download SHA256SUMS from release v$version"
-grep -F "  $archive" SHA256SUMS > archive.sha256 \
+listed="$(grep -F "  $archive" SHA256SUMS)" \
   || fail "SHA256SUMS of release v$version does not list $archive"
-if command -v sha256sum > /dev/null 2>&1; then
-  sha256sum --status -c archive.sha256 || fail "$archive does not match its checksum"
-else
-  shasum -a 256 --status -c archive.sha256 || fail "$archive does not match its checksum"
-fi
+# Compared here rather than with a checker: the one on macOS passes a malformed line.
+digest="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$archive")" \
+  || fail "cannot read $archive to verify its checksum"
+[ "$listed" = "$digest  $archive" ] || fail "$archive does not match its checksum"
 tar -xzf "$archive" -C tools || fail "cannot unpack $archive"
-rm -f "$archive" archive.sha256 SHA256SUMS
+rm -f "$archive" SHA256SUMS
 
 # shellcheck source=action/dependencies.env
 . "$action_path/action/dependencies.env"

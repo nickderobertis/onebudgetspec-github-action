@@ -373,14 +373,16 @@ class Diagnostics(Journey):
     def test_install_failures_are_diagnostic(self):
         self.repository.write('budgets.yaml', budgets_yaml([('over-budget', reported(500), {})]))
         sha = self.repository.commit('catalog')
-        original = dict(self.host.assets)
-        self.host.assets['SHA256SUMS'] = b'0000  ' + next(k for k in original if k.endswith('.gz')).encode() + b'\n'
-        job = self.base(sha)
-        self.assertEqual(job.exit_code, 0, job.stdout)
-        self.assertIn('checksum', job.summary)
-        self.assertEqual(self.executed(), [])
+        archive = next(name for name in self.host.assets if name.endswith('.gz'))
+        # A wrong digest and a line that is no digest at all: neither may pass as verified.
+        for attempt, digest in enumerate(('0' * 64, '0000'), start=1):
+            self.host.assets['SHA256SUMS'] = f'{digest}  {archive}\n'.encode()
+            job = self.base(sha, attempt=attempt)
+            self.assertEqual(job.exit_code, 0, job.stdout)
+            self.assertIn('checksum', job.summary)
+            self.assertEqual(self.executed(), [])
         self.host.assets = {}
-        job = self.base(sha, attempt=2)
+        job = self.base(sha, attempt=3)
         self.assertEqual(job.exit_code, 0)
         self.assertIn('cannot download', job.summary)
 
