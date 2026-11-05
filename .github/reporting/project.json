@@ -1,0 +1,39 @@
+{
+  "name": "report-job",
+  "tags": [
+    "type:e2e"
+  ],
+  "implicitDependencies": [
+    "onebudgetspec-github-action",
+    "action-harness",
+    "action",
+    "workspace"
+  ],
+  "targets": {
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo build --quiet --locked -p onebudgetspec-github-action && uv run --no-project --quiet --with pyyaml python .github/reporting/test_report_job.py"
+      },
+      "outputs": [
+        "{projectRoot}/.telemetry"
+      ]
+    },
+    "budgets": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "PATH=\"$PWD/target/debug:$PWD/node_modules/.bin:$PATH\" onebudgetspec check .github/reporting/budgets.yaml"
+      },
+      "dependsOn": [
+        "test"
+      ],
+      "cache": false
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "python3 -m py_compile .github/reporting/test_report_job.py"
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "action-harness",
+  "tags": [
+    "type:tooling"
+  ],
+  "implicitDependencies": [],
+  "targets": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "python3 -m py_compile tests/action-harness/harness.py && shellcheck tests/action-harness/route-api-origin"
+      }
+    }
+  }
+}

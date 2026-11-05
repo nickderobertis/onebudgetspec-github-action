@@ -4,7 +4,10 @@
     "type:e2e"
   ],
   "implicitDependencies": [
-    "onebudgetspec-github-action"
+    "onebudgetspec-github-action",
+    "action-harness",
+    "action",
+    "workspace"
   ],
   "targets": {
     "format": {

@@ -4,7 +4,9 @@
     "type:app"
   ],
   "implicitDependencies": [
-    "scripts"
+    "scripts",
+    "action",
+    "workspace"
   ],
   "targets": {
     "format": {

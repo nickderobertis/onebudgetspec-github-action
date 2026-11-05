@@ -1,0 +1,93 @@
+name: onebudgetspec budget report
+description: >-
+  Check every runnable budget once through ordinary onebudgetspec check, compare it with the
+  base branch's rolling history and keep one standing report on the pull request.
+branding:
+  icon: bar-chart-2
+  color: blue
+inputs:
+  token:
+    description: Token reading run artifacts and posting the comment (actions read, pull-requests write).
+    required: true
+  budget-files:
+    description: Budgets files, as globs separated by commas or newlines. Fixture and conformance trees are never production budgets.
+    required: false
+    default: "**/budgets.yaml"
+  labels:
+    description: >-
+      Labels declaring a budget measurable in this job, separated by commas or newlines. A runnable
+      budget without one still runs; one with a label that cannot run gets a diagnostic. The job's
+      telemetry carries these labels.
+    required: false
+    default: ci-report
+  artifact-name:
+    description: Name of the artifact holding the results and the rolling history.
+    required: false
+    default: budget-results
+  enforcement-exclude-labels:
+    description: >-
+      Labels whose budgets are report-only, separated by commas or newlines: each still runs once and
+      keeps its verdict and flags, and never fails this job. Empty enforces every budget.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Install the report tools
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/action/install.sh" "$GITHUB_ACTION_PATH" "$RUNNER_TEMP/onebudgetspec-action"
+    - name: Check, compare and report
+      id: report
+      if: always()
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        BUDGET_FILES: ${{ inputs.budget-files }}
+        LABELS: ${{ inputs.labels }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        ENFORCEMENT_EXCLUDE_LABELS: ${{ inputs.enforcement-exclude-labels }}
+        EVENT_NAME: ${{ github.event_name }}
+        REPOSITORY: ${{ github.repository }}
+        SERVER_URL: ${{ github.server_url }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        REF_TYPE: ${{ github.ref_type }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        BASE_REF: ${{ github.base_ref || github.ref_name }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+      run: bash "$GITHUB_ACTION_PATH/action/run.sh" report
+    - name: Save the results
+      id: main-upload
+      if: always()
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.report.outputs.main-artifact }}
+        path: ${{ steps.report.outputs.out }}
+        if-no-files-found: warn
+    - name: Stop the timer and judge this job's own telemetry
+      id: finish
+      if: always()
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        MAIN_UPLOAD: ${{ steps.main-upload.outcome }}
+      run: bash "$GITHUB_ACTION_PATH/action/run.sh" finish
+    - name: Save the completed verdicts
+      id: final-upload
+      if: always() && steps.finish.outputs.final-upload == 'true'
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.report.outputs.out }}
+        if-no-files-found: warn
+    - name: Conclude with the ordinary budget verdict
+      if: always()
+      shell: bash
+      env:
+        FINAL_UPLOAD: ${{ steps.final-upload.outcome }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+      run: bash "$GITHUB_ACTION_PATH/action/run.sh" conclude

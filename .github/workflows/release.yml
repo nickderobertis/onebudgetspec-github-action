@@ -1,0 +1,91 @@
+# Publish what a GitHub Release names, payload first and crate last. release-plz cuts that release
+# with a PAT, which is what lets it fire this workflow; the release pull request already swept this
+# commit, so nothing is re-gated here. Consumers wait on the crate, so it must come last.
+name: release
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  # Compiled here, once per runner the action supports, so a reporting job never compiles.
+  archives:
+    name: archive (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { runner: macos-14, target: aarch64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Build the archive
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          TARGET: ${{ matrix.target }}
+        run: bash scripts/build-action-archive.sh "${TAG#v}" "$TARGET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  payload:
+    needs: [archives]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-payload
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the action payload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: bash scripts/publish-payload.sh "$TAG" dist
+
+  crate:
+    needs: [payload]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
+    steps:
+      - name: Require the publishing secret
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::publishing needs the repository secret CARGO_REGISTRY_TOKEN (Settings → Secrets and variables → Actions)." >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Publish the crate, after the probe verifies the payload
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: bash scripts/publish-crate.sh "$TAG"
