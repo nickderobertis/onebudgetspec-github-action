@@ -128,7 +128,12 @@ fn ordinary_check(
         .map_err(|error| (exit::INVALID, format!("cannot run onebudgetspec: {error}")))?;
     serde_json::from_slice(&output.stdout).map_err(|error| {
         (
-            output.status.code().unwrap_or(exit::ERROR),
+            // A check that exited zero with no readable report did not succeed.
+            output
+                .status
+                .code()
+                .filter(|code| *code != 0)
+                .unwrap_or(exit::ERROR),
             format!("exit {:?}, no report: {error}", output.status.code()),
         )
     })
