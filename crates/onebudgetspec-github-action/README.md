@@ -155,5 +155,8 @@ release pull request, which lands once its checks pass. It tags and cuts the Git
 That release fires `.github/workflows/release.yml`, which, for that immutable version, in order: builds each runner's
 archive, uploads `action.yml`, the archives and `SHA256SUMS` to the release, verifies them through the real release
 probe, and only then publishes the crate. A missing or mismatched payload stops the crate.
+A publish that failed partway runs again by starting that workflow by hand with the release's tag, for example
+`gh workflow run release.yml --ref main -f tag=v1.2.3`: everything published comes from the tag, and only the
+runner labels come from `main`.
 `release-targets.toml` declares both targets; consumers wait on the crate, which therefore means the whole payload
 of that version is usable.

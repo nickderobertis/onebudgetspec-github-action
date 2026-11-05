@@ -228,6 +228,32 @@ class ReleaseRunners(unittest.TestCase):
         gate = re.search(r'os: \[(.+?)\]', self.job('ci.yml', 'gate'))[1].split(', ')
         self.assertIn(runners['aarch64-apple-darwin'], gate)
 
+    def test_both_routes_publish_one_tag_from_this_workflow(self):
+        text = (ROOT / '.github/workflows/release.yml').read_text()
+        triggers = re.search(r'^on:\n(.*?)(?=^\S)', text, re.M | re.S)[1]
+        self.assertRegex(triggers, r'^  release:\n    types: \[published\]\n', 'a published release still starts it')
+        self.assertRegex(
+            triggers,
+            r'(?m)^  workflow_dispatch:\n    inputs:\n      tag:\n(?:        description: .+\n)?        required: true\n        type: string\n',
+            'a person can start it, and must name the tag')
+        self.assertRegex(text, r'(?m)^env:\n  TAG: \$\{\{ github\.event\.release\.tag_name \|\| inputs\.tag \}\}\n')
+        jobs = {name: self.job('release.yml', name) for name in ('archives', 'payload', 'crate')}
+        for name, job in jobs.items():
+            with self.subTest(job=name):
+                # A branch named like the tag must not win, so each checkout is fully qualified.
+                checkouts = re.findall(r'uses: actions/checkout@\S+\n\s+with:\n\s+ref: (.+)\n', job)
+                self.assertEqual(checkouts, ['refs/tags/${{ env.TAG }}'])
+                self.assertEqual(job.count('actions/checkout'), 1)
+                # Nothing in a job reads a route's own value, or shadows the one tag.
+                self.assertNotRegex(job, r'github\.(event|ref|sha)|inputs\.|\bTAG:')
+        self.assertIn('scripts/build-action-archive.sh "${TAG#v}" "$TARGET"', jobs['archives'])
+        self.assertIn('scripts/publish-payload.sh "$TAG" dist', jobs['payload'])
+        self.assertIn('scripts/publish-crate.sh "$TAG"', jobs['crate'])
+        targets = re.findall(r'- \{ runner: [^,]+, target: ([^ ]+) \}', jobs['archives'])
+        self.assertEqual(sorted(targets), ['aarch64-apple-darwin', 'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-gnu'])
+        self.assertRegex(jobs['payload'], r'^    needs: \[archives\]\n')
+        self.assertRegex(jobs['crate'], r'^    needs: \[payload\]\n')
+
     def test_a_target_that_is_not_this_machine_is_refused(self):
         for difference in ('os only', 'architecture only', 'both'):
             target = self.TARGETS[difference]

@@ -1,13 +1,25 @@
 # Publish what a GitHub Release names, payload first and crate last. release-plz cuts that release
 # with a PAT, which is what lets it fire this workflow; the release pull request already swept this
 # commit, so nothing is re-gated here. Consumers wait on the crate, so it must come last.
+# Started by hand for a tag, it republishes a release that already exists: a re-run reads the
+# workflow from the tagged commit, a dispatch from main, so only these runner labels come from main.
 name: release
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag of the existing GitHub Release to publish, like v1.2.3.
+        required: true
+        type: string
 
 permissions: {}
+
+# The one tag on both routes: source, archives, payload and crate all come from it.
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
   # Compiled here, once per runner the action supports, so a reporting job never compiles.
@@ -26,13 +38,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: refs/tags/${{ env.TAG }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
       - name: Build the archive
         env:
-          TAG: ${{ github.event.release.tag_name }}
           TARGET: ${{ matrix.target }}
         run: bash scripts/build-action-archive.sh "${TAG#v}" "$TARGET"
       - uses: actions/upload-artifact@v4
@@ -52,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: refs/tags/${{ env.TAG }}
       - uses: actions/download-artifact@v5
         with:
           path: dist
@@ -60,7 +71,6 @@ jobs:
       - name: Publish the action payload
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
         run: bash scripts/publish-payload.sh "$TAG" dist
 
   crate:
@@ -82,10 +92,9 @@ jobs:
           fi
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: refs/tags/${{ env.TAG }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Publish the crate, after the probe verifies the payload
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
         run: bash scripts/publish-crate.sh "$TAG"
