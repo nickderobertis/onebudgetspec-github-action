@@ -33,7 +33,8 @@ pub fn now() -> f64 {
 
 /// The check run's ordinary answers, merged.
 pub struct Checked {
-    /// Every result, unchanged, minus measurements GitHub's refusal left incomplete.
+    /// Every result, unchanged, minus measurements GitHub's refusal left incomplete and
+    /// report-only budgets whose measurement failed.
     pub report: CheckReport,
     /// Rows that could not be measured, with why.
     pub unavailable: Vec<UnavailableBudget>,
@@ -56,7 +57,7 @@ pub fn check_partitioned(
         .collect();
     let (report_only, enforced): (Vec<_>, Vec<_>) = selected
         .iter()
-        .partition(|budget| budget.labels.iter().any(|label| excluded.contains(label)));
+        .partition(|budget| is_report_only(&budget.labels, excluded));
     let mut checked = Checked {
         report: CheckReport {
             schema_version: 1,
@@ -90,19 +91,31 @@ pub fn check_partitioned(
     let log = proxy::read_log(&wiring.log);
     let unavailable = &mut checked.unavailable;
     checked.report.results.retain(|result| {
-        let blocked = (result.verdict == onebudgetspec_core::Verdict::Error)
-            .then(|| proxy::blocked_reason(&log, &result.id))
-            .flatten();
-        if let Some(reason) = &blocked {
-            unavailable.push(UnavailableBudget {
-                file: result.file.clone(),
-                id: result.id.clone(),
-                reason: reason.clone(),
-            });
+        if result.verdict != onebudgetspec_core::Verdict::Error {
+            return true;
         }
-        blocked.is_none()
+        let reason = proxy::blocked_reason(&log, &result.id).or_else(|| {
+            is_report_only(&result.labels, excluded).then(|| {
+                let message = result.error.as_deref().unwrap_or("no reason given");
+                format!("report-only measurement failed: {message}")
+            })
+        });
+        let Some(reason) = reason else {
+            return true;
+        };
+        unavailable.push(UnavailableBudget {
+            file: result.file.clone(),
+            id: result.id.clone(),
+            reason,
+        });
+        false
     });
     checked
+}
+
+/// Whether a budget with `labels` is excluded from enforcement, as core's exit decides it.
+fn is_report_only(labels: &[String], excluded: &[String]) -> bool {
+    labels.iter().any(|label| excluded.contains(label))
 }
 
 fn ordinary_check(

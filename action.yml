@@ -27,7 +27,8 @@ inputs:
   enforcement-exclude-labels:
     description: >-
       Labels whose budgets are report-only, separated by commas or newlines: each still runs once and
-      keeps its verdict and flags, and never fails this job. Empty enforces every budget.
+      keeps its verdict and flags, and never fails this job. One whose measurement fails reads as
+      unavailable, with the failure's message as its reason. Empty enforces every budget.
     required: false
     default: ""
 runs:
