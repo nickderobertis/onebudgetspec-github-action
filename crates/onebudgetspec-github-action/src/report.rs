@@ -24,6 +24,9 @@ use crate::tools;
 /// The base history holds at most this many commits.
 const MAX_HISTORY_COMMITS: usize = 20;
 
+/// Why a base run leaves the history as it found it.
+const NOTHING_MEASURED: &str = "no rolling file saved: this run completed no measurement, so the next base run reads the one before it";
+
 /// The current time as Unix seconds.
 pub fn now() -> f64 {
     SystemTime::now()
@@ -302,13 +305,19 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
     let (prior, history_cost) = read_history(&config, &wiring, &mut diagnostics);
     phases.archive = now() - phase_start;
     diagnostics.extend(mode_diagnostics(args, &main_artifact(args, &own)));
-    let rolling = rolling_history(
-        &config,
-        prior.as_ref(),
-        &current,
-        invocation_exit,
-        &mut diagnostics,
-    );
+    let rolling_pending = waits_for_own(args.mode, &current, invocation_exit, &own);
+    let prior_read = prior.is_some();
+    let rolling = if rolling_pending {
+        None
+    } else {
+        rolling_history(
+            &config,
+            prior.as_ref(),
+            &current,
+            invocation_exit,
+            &mut diagnostics,
+        )
+    };
     write_rolling(out, rolling.as_ref())?;
     state::write_json(&out.join(file::BUDGET_RUN), &current)?;
     let saved_diagnostics = compare_and_deliver(
@@ -332,6 +341,8 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
         "deny_credentials": denies_credentials(args.mode),
         "history_cost": history_cost,
         "run_own": args.mode != Mode::Privileged,
+        "rolling_pending": rolling_pending,
+        "prior_read": prior_read,
     });
     state::write_json(&state_directory.join(file::CONTINUATION), &continuation)?;
     if args.phased {
@@ -713,7 +724,26 @@ fn look_up_workflow(args: &ReportArgs, wiring: &Wiring) -> Result<u64, String> {
         .map_err(|error| format!("this run's workflow id {answer} is unreadable: {error}"))
 }
 
-/// The base job's next rolling file: the prior entries carried forward with this run last.
+/// Whether a base run's history rests on its own commands: they run in `finish`, so only then
+/// can a run with nothing else measured decide.
+fn waits_for_own(
+    mode: Mode,
+    current: &BudgetRun,
+    invocation_exit: Option<i32>,
+    own: &[(String, PathBuf)],
+) -> bool {
+    mode == Mode::Base && invocation_exit.is_none() && !measured(current) && !own.is_empty()
+}
+
+/// Whether `run` holds any figure: an errored result records none.
+fn measured(run: &BudgetRun) -> bool {
+    run.results
+        .results
+        .iter()
+        .any(|result| result.actual.is_some())
+}
+
+/// The base job's next rolling file, if this run measured anything.
 fn rolling_history(
     config: &Config<'_>,
     prior: Option<&RollingHistory>,
@@ -724,16 +754,44 @@ fn rolling_history(
     if config.args.mode != Mode::Base {
         return None;
     }
-    if invocation_exit.is_some() || current.results.results.is_empty() {
-        diagnostics.push(
-            "no rolling file saved: this run completed no measurement, so the next base run reads the one before it".into(),
-        );
+    if invocation_exit.is_some() || !measured(current) {
+        diagnostics.push(NOTHING_MEASURED.into());
         return None;
     }
-    let fresh = prior.is_none();
-    let mut runs: Vec<BudgetRun> = prior
-        .map(|history| history.runs.clone())
-        .unwrap_or_default();
+    let runs = prior.map_or_else(Vec::new, |history| history.runs.clone());
+    extended_history(prior.is_none(), runs, current, diagnostics)
+}
+
+/// The rolling file `report` left to `finish`, now that the own commands have run: the runs
+/// the comparison already read, which hold no entry for this commit, with this run last.
+pub fn settle_pending_rolling(
+    out: &Path,
+    continuation: &Value,
+    input: &ComparisonInput,
+    own_check_exit: Option<i32>,
+    diagnostics: &mut Vec<String>,
+) -> Result<(), Failure> {
+    let rolling = if own_check_exit.is_some() || !measured(&input.current) {
+        diagnostics.push(NOTHING_MEASURED.into());
+        None
+    } else {
+        extended_history(
+            continuation["prior_read"] != true,
+            input.baseline.clone(),
+            &input.current,
+            diagnostics,
+        )
+    };
+    write_rolling(out, rolling.as_ref())
+}
+
+/// The prior entries carried forward with this run last, deduplicated by commit and trimmed.
+fn extended_history(
+    fresh: bool,
+    mut runs: Vec<BudgetRun>,
+    current: &BudgetRun,
+    diagnostics: &mut Vec<String>,
+) -> Option<RollingHistory> {
     runs.retain(|run| run.head_sha != current.head_sha);
     runs.push(current.clone());
     let keep_from = runs.len().saturating_sub(MAX_HISTORY_COMMITS);

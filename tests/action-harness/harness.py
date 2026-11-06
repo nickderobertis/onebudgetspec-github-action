@@ -180,6 +180,9 @@ class Host:
         self.artifacts = {}
         self.archives = {}
         self.comments = []
+        # Who the token is and who its comments read as; `actions_bot` is the Actions token's shape.
+        self.viewer_login = 'viewer'
+        self.comment_author = {'__typename': 'User', 'login': 'viewer'}
         self.head = None
         self.refuse = []
         self.write_status = None
@@ -293,8 +296,8 @@ class Host:
             answer = {'data': {'pagedItems': {'nodes': [1], 'pageInfo': {'hasNextPage': page is None, 'endCursor': 'next'}}}}
             return self.reply(handler, 200, json.dumps(answer).encode())
         nodes = [dict(id=c['node_id'], databaseId=c['id'], url=c['html_url'], body=c['body'],
-                      author={'login': 'viewer'}) for c in self.comments]
-        answer = {'data': {'viewer': {'login': 'viewer'}, 'repository': {'name': 'repo', 'pullRequest': {
+                      author=self.comment_author) for c in self.comments]
+        answer = {'data': {'viewer': {'login': self.viewer_login}, 'repository': {'name': 'repo', 'pullRequest': {
             'headRefOid': self.head,
             'comments': {'nodes': nodes, 'pageInfo': {'hasNextPage': False, 'endCursor': None}}}}}}
         self.reply(handler, 200, json.dumps(answer).encode())
@@ -339,6 +342,11 @@ class Host:
         if clean.startswith('/repos/owner/repo/'):
             return self.reply(handler, 200, b'{"ok":true}')
         return self.reply(handler, 404, b'{"message":"Not Found"}')
+
+    def actions_bot(self):
+        """Answer as GitHub does for the Actions token: one account, spelled two ways."""
+        self.viewer_login = 'github-actions[bot]'
+        self.comment_author = {'__typename': 'Bot', 'login': 'github-actions'}
 
     def add_run(self, run_id, head, attempt=1, minute=0, branch='main', event='push', workflow=WORKFLOW, status='completed'):
         with self.lock:

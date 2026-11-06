@@ -101,6 +101,7 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
         ));
     }
     let core_cli = tools::locate(tools::CORE)?;
+    let rolling_pending = continuation["rolling_pending"] == true;
     let current = &mut input.current;
     for (id, reason) in not_run {
         if let Some(row) = current.unavailable.iter_mut().find(|row| row.id == id) {
@@ -128,6 +129,15 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
         carry_into_rolling(out, current)?;
         state::write_json(&out.join(file::BUDGET_RUN), current)?;
         state::write_json(&out.join(file::INPUT), &input)?;
+    }
+    if rolling_pending {
+        report::settle_pending_rolling(
+            out,
+            &continuation,
+            &input,
+            own_check_exit,
+            &mut diagnostics,
+        )?;
     }
     let mut compared = report::compare(&core_cli, &out.join(file::INPUT))?;
     report::save_report(out, &mut compared, &diagnostics)?;
