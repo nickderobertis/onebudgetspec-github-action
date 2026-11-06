@@ -1327,6 +1327,26 @@ class Degraded(Journey):
             self.assertEqual(finish.returncode, 1)
             self.assertIn('cannot read', finish.stderr)
 
+    def test_a_finish_with_an_unreadable_rolling_decision_refuses_it(self):
+        self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(5), {})]))
+        tools, _ = self.tools()
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            phased = self.direct(tools, '--out', directory, '--phased')
+            self.assertEqual(phased.returncode, 0, phased.stderr)
+            # With no readable saved run to fall back on, the refusal itself is the answer.
+            (out / 'budget-run.json').write_text('{}')
+            continuation_path = out / '.state/continuation.json'
+            continuation = json.loads(continuation_path.read_text())
+            self.assertEqual(continuation['rolling'], 'settled')
+            for bad in ('nonsense', None):
+                continuation['rolling'] = bad
+                continuation_path.write_text(json.dumps(continuation))
+                finish = harness.bounded_run([str(tools / 'onebudgetspec-github-action'), 'finish', '--out', directory],
+                                             cwd=self.repository.path, capture_output=True, text=True, check=False, env=clean_environment())
+                self.assertEqual(finish.returncode, 1, finish.stderr)
+                self.assertIn('rolling decision', finish.stderr)
+
     def test_an_action_step_that_cannot_write_is_diagnostic_not_a_failed_job(self):
         self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(500), {})]))
 

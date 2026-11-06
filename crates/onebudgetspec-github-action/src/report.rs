@@ -18,7 +18,7 @@ use crate::catalog::{self, Disposition};
 use crate::cli::{Mode, ReportArgs, ReproduceArgs};
 use crate::finish;
 use crate::proxy::{self, Wiring};
-use crate::state::{self, Failure, Phases, file};
+use crate::state::{self, Failure, Phases, RollingDecision, file};
 use crate::tools;
 
 /// The base history holds at most this many commits.
@@ -305,11 +305,9 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
     let (prior, history_cost) = read_history(&config, &wiring, &mut diagnostics);
     phases.archive = now() - phase_start;
     diagnostics.extend(mode_diagnostics(args, &main_artifact(args, &own)));
-    let rolling_pending = waits_for_own(args.mode, &current, invocation_exit, &own);
-    let prior_read = prior.is_some();
-    let rolling = if rolling_pending {
-        None
-    } else {
+    let rolling_decision =
+        decide_rolling(&config, &current, invocation_exit, &own, prior.is_some());
+    let rolling = if rolling_decision == RollingDecision::Settled {
         rolling_history(
             &config,
             prior.as_ref(),
@@ -317,6 +315,8 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
             invocation_exit,
             &mut diagnostics,
         )
+    } else {
+        None
     };
     write_rolling(out, rolling.as_ref())?;
     state::write_json(&out.join(file::BUDGET_RUN), &current)?;
@@ -341,8 +341,7 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
         "deny_credentials": denies_credentials(args.mode),
         "history_cost": history_cost,
         "run_own": args.mode != Mode::Privileged,
-        "rolling_pending": rolling_pending,
-        "prior_read": prior_read,
+        "rolling": rolling_decision.name(),
     });
     state::write_json(&state_directory.join(file::CONTINUATION), &continuation)?;
     if args.phased {
@@ -724,15 +723,23 @@ fn look_up_workflow(args: &ReportArgs, wiring: &Wiring) -> Result<u64, String> {
         .map_err(|error| format!("this run's workflow id {answer} is unreadable: {error}"))
 }
 
-/// Whether a base run's history rests on its own commands: they run in `finish`, so only then
-/// can a run with nothing else measured decide.
-fn waits_for_own(
-    mode: Mode,
+/// Own commands run in `finish`, so only then can a base run with nothing else measured decide.
+fn decide_rolling(
+    config: &Config<'_>,
     current: &BudgetRun,
     invocation_exit: Option<i32>,
     own: &[(String, PathBuf)],
-) -> bool {
-    mode == Mode::Base && invocation_exit.is_none() && !measured(current) && !own.is_empty()
+    prior_read: bool,
+) -> RollingDecision {
+    let waits = config.args.mode == Mode::Base
+        && invocation_exit.is_none()
+        && !measured(current)
+        && !own.is_empty();
+    match (waits, prior_read) {
+        (false, _) => RollingDecision::Settled,
+        (true, false) => RollingDecision::PendingFresh,
+        (true, true) => RollingDecision::PendingOnPrior,
+    }
 }
 
 /// Whether `run` holds any figure: an errored result records none.
@@ -766,7 +773,7 @@ fn rolling_history(
 /// the comparison already read, which hold no entry for this commit, with this run last.
 pub fn settle_pending_rolling(
     out: &Path,
-    continuation: &Value,
+    fresh: bool,
     input: &ComparisonInput,
     own_check_exit: Option<i32>,
     diagnostics: &mut Vec<String>,
@@ -775,12 +782,7 @@ pub fn settle_pending_rolling(
         diagnostics.push(NOTHING_MEASURED.into());
         None
     } else {
-        extended_history(
-            continuation["prior_read"] != true,
-            input.baseline.clone(),
-            &input.current,
-            diagnostics,
-        )
+        extended_history(fresh, input.baseline.clone(), &input.current, diagnostics)
     };
     write_rolling(out, rolling.as_ref())
 }
