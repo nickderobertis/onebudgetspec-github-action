@@ -1335,11 +1335,13 @@ class Degraded(Journey):
             phased = self.direct(tools, '--out', directory, '--phased')
             self.assertEqual(phased.returncode, 0, phased.stderr)
             # With no readable saved run to fall back on, the refusal itself is the answer.
+            # llmlint: ignore[tests_mirror_real_usage] only a damaged state directory reaches this refusal, and no command writes one, so the journey damages the saved run the fallback would otherwise answer from; the report phase before it and the finish after it stay real.
             (out / 'budget-run.json').write_text('{}')
             continuation_path = out / '.state/continuation.json'
             continuation = json.loads(continuation_path.read_text())
             self.assertEqual(continuation['rolling'], 'settled')
             for bad in ('nonsense', None):
+                # llmlint: ignore[tests_mirror_real_usage] no command writes a bad decision, since report only saves the three spellings it can parse, so rewriting the file is the only way to prove finish refuses one instead of skipping a pending rolling file.
                 continuation['rolling'] = bad
                 continuation_path.write_text(json.dumps(continuation))
                 finish = harness.bounded_run([str(tools / 'onebudgetspec-github-action'), 'finish', '--out', directory],

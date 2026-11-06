@@ -765,35 +765,42 @@ fn rolling_history(
         diagnostics.push(NOTHING_MEASURED.into());
         return None;
     }
-    let runs = prior.map_or_else(Vec::new, |history| history.runs.clone());
-    extended_history(prior.is_none(), runs, current, diagnostics)
+    let runs = prior.map(|history| history.runs.clone());
+    extended_history(runs, current, diagnostics)
 }
 
-/// The rolling file `report` left to `finish`, now that the own commands have run: the runs
-/// the comparison already read, which hold no entry for this commit, with this run last.
+/// Settle the rolling file `report` left to `finish`, now that the own commands have run. A
+/// prior history extends through the runs the comparison read, which omit this commit.
 pub fn settle_pending_rolling(
     out: &Path,
-    fresh: bool,
+    decision: RollingDecision,
     input: &ComparisonInput,
     own_check_exit: Option<i32>,
     diagnostics: &mut Vec<String>,
 ) -> Result<(), Failure> {
+    let prior = match decision {
+        RollingDecision::Settled => return Ok(()),
+        RollingDecision::PendingFresh => None,
+        RollingDecision::PendingOnPrior => Some(input.baseline.clone()),
+    };
     let rolling = if own_check_exit.is_some() || !measured(&input.current) {
         diagnostics.push(NOTHING_MEASURED.into());
         None
     } else {
-        extended_history(fresh, input.baseline.clone(), &input.current, diagnostics)
+        extended_history(prior, &input.current, diagnostics)
     };
     write_rolling(out, rolling.as_ref())
 }
 
-/// The prior entries carried forward with this run last, deduplicated by commit and trimmed.
+/// `prior`'s entries, none when no history was read, with this run last: deduplicated by commit
+/// and trimmed.
 fn extended_history(
-    fresh: bool,
-    mut runs: Vec<BudgetRun>,
+    prior: Option<Vec<BudgetRun>>,
     current: &BudgetRun,
     diagnostics: &mut Vec<String>,
 ) -> Option<RollingHistory> {
+    let fresh = prior.is_none();
+    let mut runs = prior.unwrap_or_default();
     runs.retain(|run| run.head_sha != current.head_sha);
     runs.push(current.clone());
     let keep_from = runs.len().saturating_sub(MAX_HISTORY_COMMITS);

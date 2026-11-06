@@ -130,15 +130,7 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
         state::write_json(&out.join(file::BUDGET_RUN), current)?;
         state::write_json(&out.join(file::INPUT), &input)?;
     }
-    if rolling != RollingDecision::Settled {
-        report::settle_pending_rolling(
-            out,
-            rolling == RollingDecision::PendingFresh,
-            &input,
-            own_check_exit,
-            &mut diagnostics,
-        )?;
-    }
+    report::settle_pending_rolling(out, rolling, &input, own_check_exit, &mut diagnostics)?;
     let mut compared = report::compare(&core_cli, &out.join(file::INPUT))?;
     report::save_report(out, &mut compared, &diagnostics)?;
     let exit_status = continuation["invocation_exit"]
