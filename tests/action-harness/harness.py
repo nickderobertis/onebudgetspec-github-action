@@ -76,11 +76,16 @@ def bounded_run(arguments, **options):
 
 
 def real_gh_environment(host_url, home):
-    """What sends the real `gh` to the double, and never to GitHub, with an empty config."""
+    """What sends the real `gh` to the double, and never to GitHub, with an empty config.
+
+    With no token for its target `gh` asks the keyring, whose session bus `dbus-launch` starts and
+    nothing ends; each one left behind holds inotify instances on the host. `disabled:` stops that.
+    """
     if shutil.which('gh') is None:
         raise RuntimeError('the journeys drive the real GitHub CLI; install gh, then re-run')
     return {'GH_HOST': 'github.localhost', 'HTTP_PROXY': host_url, 'GH_CONFIG_DIR': str(Path(home) / 'gh-config'),
-            'GH_PROMPT_DISABLED': '1', 'http_proxy': host_url, 'ROUTED_GH': shutil.which('gh')}
+            'GH_PROMPT_DISABLED': '1', 'http_proxy': host_url, 'ROUTED_GH': shutil.which('gh'),
+            'DBUS_SESSION_BUS_ADDRESS': 'disabled:'}
 
 
 def dependencies():

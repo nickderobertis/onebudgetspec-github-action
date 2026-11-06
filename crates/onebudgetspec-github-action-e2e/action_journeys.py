@@ -1421,6 +1421,53 @@ class Degraded(Journey):
             self.assertEqual(answer.returncode, 3, 'nothing says the host refused it, so this stays an error')
 
 
+class SessionBus(unittest.TestCase):
+    """No environment handed to the real `gh` lets it autolaunch a session bus, which nothing ends.
+
+    The stand-in only records and fails, and it is first on the PATH `gh` searches, so a failing
+    guard starts nothing. Its positive control shows this `gh` still asks once the variable goes.
+    """
+
+    def setUp(self):
+        if not sys.platform.startswith('linux') or shutil.which('gh') is None:
+            self.skipTest('no session bus can start here: this needs the real gh on Linux')
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.scratch = Path(directory.name)
+        self.calls = self.scratch / 'dbus-launch-calls'
+        stand_in = self.scratch / 'bin' / 'dbus-launch'
+        stand_in.parent.mkdir()
+        stand_in.write_text(f'#!/bin/sh\necho called >> "{self.calls}"\nexit 1\n')
+        stand_in.chmod(0o755)
+        self.path = f'{stand_in.parent}{os.pathsep}{os.environ["PATH"]}'
+
+    def asks(self, environment):
+        """Run the real `gh`: what it answered, and how many buses it tried to start doing so."""
+        self.calls.unlink(missing_ok=True)
+        # `auth token` asks the keyring just as a tokenless request does, and sends nothing anywhere.
+        answer = harness.bounded_run([shutil.which('gh'), 'auth', 'token'], capture_output=True, text=True, cwd=self.scratch,
+                                     env={**environment, 'HOME': str(self.scratch), 'PATH': self.path})
+        count = len(self.calls.read_text().splitlines()) if self.calls.exists() else 0
+        return count, (answer.returncode, answer.stdout, answer.stderr)
+
+    def assert_starts_no_bus(self, environment):
+        unguarded = {key: value for key, value in environment.items() if key != 'DBUS_SESSION_BUS_ADDRESS'}
+        asked, without = self.asks(unguarded)
+        if not asked:
+            self.skipTest('this gh no longer asks for a session bus without the variable, so none can leak')
+        self.assertEqual(asked, 1, 'the control: one call autolaunches one bus')
+        count, guarded = self.asks(environment)
+        self.assertEqual(count, 0, 'this environment lets gh start a session bus; give it DBUS_SESSION_BUS_ADDRESS=disabled:')
+        self.assertEqual(guarded, without, 'the variable changes nothing else about the call')
+
+    def test_the_harness_environment_starts_no_bus(self):
+        self.assert_starts_no_bus(harness.real_gh_environment('http://127.0.0.1:9', self.scratch))
+
+    def test_the_direct_environment_starts_no_bus(self):
+        # `asks` gives this call a HOME with no login; a tokenless direct run reaches the real `gh` with the ambient one's.
+        self.assert_starts_no_bus(clean_environment())
+
+
 class Contract(unittest.TestCase):
     """action.yml is the authority; the driver, the reference workflow and the README follow it."""
 
@@ -1482,7 +1529,8 @@ def zipped(members):
 def clean_environment():
     """Outside Actions: no GITHUB_* variable, no token, no doubled service."""
     keep = ('PATH', 'HOME', 'LLVM_PROFILE_FILE')
-    return {key: os.environ[key] for key in keep if key in os.environ}
+    # A tokenless call that reaches the real `gh` under this HOME asks the keyring: no session bus.
+    return {**{key: os.environ[key] for key in keep if key in os.environ}, 'DBUS_SESSION_BUS_ADDRESS': 'disabled:'}
 
 
 if __name__ == '__main__':
