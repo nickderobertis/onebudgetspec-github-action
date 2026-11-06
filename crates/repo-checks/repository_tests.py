@@ -7,6 +7,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import textwrap
@@ -19,6 +20,11 @@ DECLARATION = tomllib.loads((ROOT / 'release-targets.toml').read_text())
 
 def run(args, **kwargs):
     return subprocess.run(args, capture_output=True, text=True, check=False, **kwargs)
+
+
+def onevcs_environment(home):
+    """What the real onevcs runs under. It reaches the real `gh`, with no token: no session bus."""
+    return {**os.environ, 'HOME': str(home), 'ONEVCS_HOME': str(home / 'onevcs'), 'DBUS_SESSION_BUS_ADDRESS': 'disabled:'}
 
 
 def mapping(block):
@@ -128,7 +134,7 @@ class Repository(unittest.TestCase):
             shutil.copy2(ROOT / 'release-targets.toml', checkout)
             home = temp / 'home'
             home.mkdir()
-            env = {**os.environ, 'HOME': str(home), 'ONEVCS_HOME': str(home / 'onevcs')}
+            env = onevcs_environment(home)
             for args in [['git', 'init', '-b', 'main', str(checkout)], ['git', '-C', str(checkout), 'add', '.'], ['git', '-C', str(checkout), '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'feat: scaffold']]:
                 result = run(args, env=env)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -199,6 +205,37 @@ class Repository(unittest.TestCase):
             unknown = run([binary, 'release', 'latest', str(checkout), '--target', 'unknown', '--json'], env=env)
             self.assertNotEqual(unknown.returncode, 0)
             self.assertIn('unknown', unknown.stderr)
+
+
+class SessionBus(unittest.TestCase):
+    """`onevcs register` reaches the real `gh` with no token, which must not autolaunch a session bus."""
+
+    def test_the_onevcs_environment_starts_no_bus(self):
+        if not sys.platform.startswith('linux') or shutil.which('gh') is None:
+            self.skipTest('no session bus can start here: this needs the real gh on Linux')
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            calls = temp / 'dbus-launch-calls'
+            # Only records and fails, first on the PATH `gh` searches, so a failing guard starts nothing.
+            stand_in = temp / 'bin' / 'dbus-launch'
+            stand_in.parent.mkdir()
+            stand_in.write_text(f'#!/bin/sh\necho called >> "{calls}"\nexit 1\n')
+            stand_in.chmod(0o755)
+            tokens = ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN')
+            environment = {key: value for key, value in onevcs_environment(temp).items() if key not in tokens}
+            # This host's own login stays out of it. `auth token` asks the keyring and sends nothing anywhere.
+            environment.update({'GH_CONFIG_DIR': str(temp / 'gh-config'), 'PATH': f'{stand_in.parent}{os.pathsep}{os.environ["PATH"]}'})
+
+            def asks(given):
+                calls.unlink(missing_ok=True)
+                run([shutil.which('gh'), 'auth', 'token'], env=given, cwd=temp)
+                return len(calls.read_text().splitlines()) if calls.exists() else 0
+
+            asked = asks({key: value for key, value in environment.items() if key != 'DBUS_SESSION_BUS_ADDRESS'})
+            if not asked:
+                self.skipTest('this gh no longer asks for a session bus without the variable, so none can leak')
+            self.assertEqual(asked, 1, 'the control: one call autolaunches one bus')
+            self.assertEqual(asks(environment), 0, 'this environment lets gh start a session bus; give it DBUS_SESSION_BUS_ADDRESS=disabled:')
 
 
 class ReleaseRunners(unittest.TestCase):
