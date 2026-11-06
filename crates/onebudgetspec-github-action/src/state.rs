@@ -90,6 +90,41 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
     })
 }
 
+/// What `report` left `finish` to do about the base job's rolling file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RollingDecision {
+    /// `report` already saved it or said why not; `finish` only carries a saved one forward.
+    Settled,
+    /// It waits on the own commands, and no prior history was read.
+    PendingFresh,
+    /// It waits on the own commands, and extends the prior history.
+    PendingOnPrior,
+}
+
+impl RollingDecision {
+    /// The continuation's spelling.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Settled => "settled",
+            Self::PendingFresh => "pending-fresh",
+            Self::PendingOnPrior => "pending-on-prior",
+        }
+    }
+
+    /// Back from the saved continuation, refusing anything but a spelling `name` gives.
+    pub fn from_continuation(continuation: &Value) -> Result<Self, Failure> {
+        let saved = &continuation["rolling"];
+        [Self::Settled, Self::PendingFresh, Self::PendingOnPrior]
+            .into_iter()
+            .find(|decision| saved == decision.name())
+            .ok_or_else(|| {
+                Failure::output(format!(
+                    "the saved continuation's rolling decision {saved} is unreadable; re-run the report step"
+                ))
+            })
+    }
+}
+
 /// The per-phase seconds and uploads the telemetry reports.
 #[derive(Debug, Clone, Default)]
 pub struct Phases {

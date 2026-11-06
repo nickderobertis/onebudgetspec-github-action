@@ -205,6 +205,30 @@ class Lifecycle(Journey):
                 self.host.artifact_files(update.run_id)['comparison-report.json'])['rows']})
             self.assertEqual(rows['shadow-limit']['verdict'], 'over')
 
+    def test_an_actions_token_keeps_one_comment_across_heads(self):
+        self.host.actions_bot()
+        self.repository.write('budgets.yaml', budgets_yaml([('figure', from_data(), {})]))
+        self.repository.write('values-figure', '11\n')
+        base = self.repository.commit('catalog')
+        self.repository.git('checkout', '--quiet', '-b', 'feature')
+        self.repository.write('values-figure', '22\n')
+        first = self.repository.commit('first head')
+        self.pull_request(first, base)
+        self.assertEqual(len(self.host.comments), 1)
+        self.assertIn(f'head: {first}', self.host.comments[0]['body'])
+
+        self.repository.write('values-figure', '33\n')
+        second = self.repository.commit('second head')
+        job = self.pull_request(second, base)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertNotIn('report not delivered', job.markdown())
+        [comment] = self.host.comments
+        self.assertIn(f'head: {second}', comment['body'])
+        self.assertNotIn(f'head: {first}', comment['body'])
+        row = next(line for line in comment['body'].splitlines() if line.startswith('|') and 'figure' in line)
+        self.assertIn('33.000', row)
+        self.assertEqual(self.host.count(r'/issues/1/comments$'), 1, 'only the first run creates')
+
     def test_enforced_error_keeps_its_exit_and_its_completed_results(self):
         self.repository.write('budgets.yaml', budgets_yaml([
             ('fine', reported(1), {}),
@@ -595,6 +619,109 @@ class History(Journey):
         self.assertEqual(heads, [first.sha, following.sha])
         self.assertIn(failed.sha, following.markdown())
         self.assertEqual(following.outcomes['final-upload'], 'success')
+
+    def only_own_measures_catalog(self, own=OWN, labels=('ci-report',)):
+        """A repository whose catalog budgets cannot run in the job, leaving only its own."""
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('needs-a-tool', ['no-such-tool-on-this-runner', '--measure'], {}),
+            ('needs-predecessor', ['cat', '.telemetry/predecessor.json'], {}),
+            ('job-seconds', own, {'unit': 'seconds', 'threshold': 120, 'labels': list(labels)}),
+        ]))
+
+    def test_a_base_run_measuring_only_its_own_budget_gives_pull_requests_a_baseline(self):
+        self.only_own_measures_catalog()
+        first = self.base(self.repository.commit('catalog'))
+        self.assertEqual(first.exit_code, 0, first.stdout)
+        self.assertEqual(first.outcomes['final-upload'], 'success')
+        main = self.host.artifact_files(first.run_id, 'budget-results-main')
+        self.assertNotIn('rolling-history.json', main, 'nothing is measured before the own command')
+        rolling = self.history_of(first.run_id)
+        self.assertEqual([run['head_sha'] for run in rolling['runs']], [first.sha])
+        [own] = rolling['runs'][-1]['results']['results']
+        self.assertEqual(own['id'], 'job-seconds')
+        self.assertEqual(own['verdict'], 'within')
+        self.assertGreater(own['actual'], 0)
+        self.assertEqual(sorted(row['id'] for row in rolling['runs'][-1]['unavailable']),
+                         ['needs-a-tool', 'needs-predecessor'])
+        self.assertNotIn('no rolling file saved', first.markdown())
+        self.assertIn('base history starts fresh', first.markdown())
+
+        # The next push carries it forward, and a rerun replaces its own entry.
+        second = self.base()
+        self.assertEqual([run['head_sha'] for run in self.history_of(second.run_id)['runs']], [first.sha, second.sha])
+        self.assertNotIn('base history starts fresh', second.markdown())
+        rerun = self.base(second.sha, run_id=second.run_id, attempt=2)
+        rolling = self.history_of(rerun.run_id)
+        self.assertEqual([run['head_sha'] for run in rolling['runs']], [first.sha, second.sha])
+        self.assertEqual(rolling['runs'][-1]['attempt'], 2)
+
+        # A pull request reads that file: its comment and its saved report both show the samples.
+        self.repository.git('checkout', '--quiet', '-b', 'feature')
+        job = self.pull_request(self.repository.commit('a change'), second.sha)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(job.rows()['job-seconds']['baseline_n'], 2, job.markdown())
+        self.assertIn('2 eligible samples', job.rows()['job-seconds']['unavailable'])
+        self.assertEqual(job.rows()['needs-a-tool']['baseline_n'], 0)
+        comment_row = next(line for line in self.host.comments[0]['body'].splitlines()
+                           if line.startswith('|') and 'job-seconds' in line)
+        self.assertIn('2 eligible samples', comment_row)
+
+    def test_a_base_run_whose_only_budget_cannot_measure_saves_no_rolling_file(self):
+        # With no own command at all, nothing is left for `finish` to decide.
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('needs-a-tool', ['no-such-tool-on-this-runner', '--measure'], {}),
+        ]))
+        nothing = self.base(self.repository.commit('catalog'))
+        self.assertEqual(nothing.exit_code, 0, nothing.stdout)
+        self.assertIsNotNone(self.host.artifact_files(nothing.run_id))
+        self.assertIsNone(self.history_of(nothing.run_id))
+        self.assertIn('no rolling file saved: this run completed no measurement', nothing.markdown())
+
+        # An own command that fails measures nothing either, enforced or report-only.
+        unreadable = [*OWN[:2], '--metric', 'no-such-metric', *OWN[4:]]
+        self.only_own_measures_catalog(own=unreadable)
+        enforced = self.base(self.repository.commit('an enforced own command that errors'))
+        self.assertEqual(enforced.exit_code, 3, enforced.stdout)
+        self.assertEqual(enforced.outcomes['final-upload'], 'success')
+        self.assertEqual(enforced.rows()['job-seconds']['verdict'], 'error')
+        self.assertIsNone(self.history_of(enforced.run_id))
+        self.assertIn('no rolling file saved: this run completed no measurement', enforced.markdown())
+
+        self.only_own_measures_catalog(own=unreadable, labels=['provisional'])
+        shadow = self.base(self.repository.commit('a report-only own command that fails'))
+        self.assertEqual(shadow.exit_code, 0, shadow.stdout)
+        self.assertIn('report-only measurement failed', shadow.rows()['job-seconds']['unavailable'])
+        self.assertIsNone(self.history_of(shadow.run_id))
+        self.assertIn('no rolling file saved: this run completed no measurement', shadow.markdown())
+
+        # An errored row with no figure beside it is not a measurement in the report phase either.
+        self.repository.write('budgets.yaml', budgets_yaml([('broken', ['bash', '-c', f'{COUNT} exit 9'], {})]))
+        broken = self.base(self.repository.commit('a command that errors'))
+        self.assertEqual(broken.exit_code, 3, broken.stdout)
+        self.assertIsNone(self.history_of(broken.run_id))
+        self.assertIn('no rolling file saved: this run completed no measurement', broken.markdown())
+
+        # None of them entered the history, so measuring again starts it fresh.
+        self.only_own_measures_catalog()
+        again = self.base(self.repository.commit('measures again'))
+        self.assertEqual([run['head_sha'] for run in self.history_of(again.run_id)['runs']], [again.sha])
+
+    def test_a_base_run_with_measured_budgets_keeps_its_rows_and_holds_its_own_once(self):
+        self.own_catalog()
+        first = self.base(self.repository.commit('catalog'))
+        second = self.base()
+        rolling = self.history_of(second.run_id)
+        self.assertEqual([run['head_sha'] for run in rolling['runs']], [first.sha, second.sha])
+        for run in rolling['runs']:
+            results = {result['id']: result for result in run['results']['results']}
+            self.assertEqual(sorted(result['id'] for result in run['results']['results']), ['job-seconds', 'steady'])
+            self.assertEqual(results['steady']['actual'], 5.0)
+            self.assertEqual(results['job-seconds']['verdict'], 'within')
+            self.assertEqual(run['unavailable'], [])
+        # The report-phase upload already held the history; the final one adds only the own verdict.
+        main = json.loads(self.host.artifact_files(second.run_id, 'budget-results-main')['rolling-history.json'])
+        self.assertEqual([r['id'] for r in main['runs'][-1]['results']['results']], ['steady'])
+        self.assertEqual(main['runs'][0], rolling['runs'][0])
 
     def test_a_retried_artifact_service_call_is_a_transfer_and_the_count_holds(self):
         self.own_catalog()
@@ -1098,6 +1225,25 @@ class Degraded(Journey):
             self.assertIn('ordinary check could not run', rows['own-seconds']['unavailable'])
             self.assertEqual(rows['steady']['verdict'], 'within', 'the first phase saw real results')
 
+    def test_an_own_check_that_cannot_run_leaves_the_pending_history_unsaved(self):
+        # A report-only own budget measures while the enforced one's check cannot run at all.
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('needs-a-tool', ['no-such-tool-on-this-runner', '--measure'], {}),
+            ('own-seconds', OWN, {'unit': 'seconds', 'threshold': 120}),
+            ('own-shadow', OWN, {'unit': 'seconds', 'threshold': 120, 'labels': ['provisional']}),
+        ]))
+        real, directory = self.tools()
+        # llmlint: ignore[e2e_not_mocked] the real core always writes a readable report when it exits zero, so only a scripted core can reach this refusal; every other core call, and the driver's whole first phase, stays real.
+        self.script(directory / 'onebudgetspec', f'[ "$1" = check ] && [[ "$*" == *own-seconds* ]] && {{ echo broken; exit 0; }}\nexec "{real}/onebudgetspec" "$@"\n')
+        with tempfile.TemporaryDirectory() as out:
+            answer = self.direct(directory, '--base-ref', 'main', '--mode', 'base', '--workflow', '1',
+                                 '--enforcement-exclude-labels', 'provisional', '--out', out)
+            self.assertEqual(answer.returncode, 3, answer.stderr)
+            rows = {row['id']: row for row in json.loads((Path(out) / 'comparison-report.json').read_text())['rows']}
+            self.assertEqual(rows['own-shadow']['verdict'], 'within', 'the report-only partition still measured')
+            self.assertFalse((Path(out) / 'rolling-history.json').exists())
+            self.assertIn('no rolling file saved', answer.stdout + (Path(out) / 'report.md').read_text())
+
     def test_tools_missing_or_answering_nonsense_are_reasons(self):
         self.repository.write('budgets.yaml', budgets_yaml([('over-budget', reported(500), {})]))
         real, directory = self.tools()
@@ -1180,6 +1326,27 @@ class Degraded(Journey):
                                     cwd=self.repository.path, capture_output=True, text=True, check=False, env=clean_environment())
             self.assertEqual(finish.returncode, 1)
             self.assertIn('cannot read', finish.stderr)
+
+    def test_a_finish_with_an_unreadable_rolling_decision_refuses_it(self):
+        self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(5), {})]))
+        tools, _ = self.tools()
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            phased = self.direct(tools, '--out', directory, '--phased')
+            self.assertEqual(phased.returncode, 0, phased.stderr)
+            # With no readable saved run to fall back on, the refusal itself is the answer.
+            # llmlint: ignore[tests_mirror_real_usage] only a damaged state directory reaches this refusal, and no command writes one, so the journey damages the saved run the fallback would otherwise answer from; the report phase before it and the finish after it stay real.
+            (out / 'budget-run.json').write_text('{}')
+            continuation_path = out / '.state/continuation.json'
+            continuation = json.loads(continuation_path.read_text())
+            self.assertEqual(continuation['rolling'], 'settled')
+            for bad in ('nonsense', None):
+                # llmlint: ignore[tests_mirror_real_usage] no command writes a bad decision, since report only saves the three spellings it can parse, so rewriting the file is the only way to prove finish refuses one instead of skipping a pending rolling file.
+                continuation_path.write_text(json.dumps({**continuation, 'rolling': bad}))
+                finish = harness.bounded_run([str(tools / 'onebudgetspec-github-action'), 'finish', '--out', directory],
+                                             cwd=self.repository.path, capture_output=True, text=True, check=False, env=clean_environment())
+                self.assertEqual(finish.returncode, 1, finish.stderr)
+                self.assertIn('rolling decision', finish.stderr)
 
     def test_an_action_step_that_cannot_write_is_diagnostic_not_a_failed_job(self):
         self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(500), {})]))

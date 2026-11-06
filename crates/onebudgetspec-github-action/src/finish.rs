@@ -14,7 +14,7 @@ use crate::catalog;
 use crate::cli::FinishArgs;
 use crate::proxy;
 use crate::report;
-use crate::state::{self, Failure, Phases, file};
+use crate::state::{self, Failure, Phases, RollingDecision, file};
 use crate::telemetry::{self, Metric};
 use crate::tools;
 
@@ -101,6 +101,7 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
         ));
     }
     let core_cli = tools::locate(tools::CORE)?;
+    let rolling = RollingDecision::from_continuation(&continuation)?;
     let current = &mut input.current;
     for (id, reason) in not_run {
         if let Some(row) = current.unavailable.iter_mut().find(|row| row.id == id) {
@@ -129,6 +130,7 @@ pub fn complete(out: &Path, main_upload: &str) -> Result<ExitCode, Failure> {
         state::write_json(&out.join(file::BUDGET_RUN), current)?;
         state::write_json(&out.join(file::INPUT), &input)?;
     }
+    report::settle_pending_rolling(out, rolling, &input, own_check_exit, &mut diagnostics)?;
     let mut compared = report::compare(&core_cli, &out.join(file::INPUT))?;
     report::save_report(out, &mut compared, &diagnostics)?;
     let exit_status = continuation["invocation_exit"]

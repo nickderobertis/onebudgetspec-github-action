@@ -73,7 +73,8 @@ runs at all, whatever the workflow says.
 ### What each run saves
 
 The artifact holds `budget-run.json`, `comparison-input.json`, `comparison-report.json`, `report.md` and `report-job.json`,
-whose request and timing breakdown covers the job. A base push adds `rolling-history.json`. Artifacts expire under the
+whose request and timing breakdown covers the job. A base push that measured at least one budget adds
+`rolling-history.json`; the job's own telemetry budget counts, though it joins only the final upload. Artifacts expire under the
 repository's retention setting, and an expired baseline reads as unavailable with that reason.
 
 ### Base history
@@ -81,7 +82,9 @@ repository's retention setting, and an expired baseline reads as unavailable wit
 Each base push reads one previous rolling file through `onebudgetspec-plugin-onevcs history`, appends its own completed
 result, deduplicates by commit, trims to 20 and uploads one new immutable file. A failed upload leaves the earlier one
 as the next run's source; the lost commit is disclosed. Concurrent pushes upload separately and files are never merged,
-so an unrelated commit cannot enter. Below five samples a row has no baseline, and from 5 to 19 it is provisional.
+so an unrelated commit cannot enter. A push that measured nothing, or whose ordinary check could not run, saves no rolling
+file and says so, and the next push reads the one before it. Below five samples a row has no baseline, and from 5 to 19 it is
+provisional.
 
 ### Requests
 
