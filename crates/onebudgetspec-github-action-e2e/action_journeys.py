@@ -1342,8 +1342,7 @@ class Degraded(Journey):
             self.assertEqual(continuation['rolling'], 'settled')
             for bad in ('nonsense', None):
                 # llmlint: ignore[tests_mirror_real_usage] no command writes a bad decision, since report only saves the three spellings it can parse, so rewriting the file is the only way to prove finish refuses one instead of skipping a pending rolling file.
-                continuation['rolling'] = bad
-                continuation_path.write_text(json.dumps(continuation))
+                continuation_path.write_text(json.dumps({**continuation, 'rolling': bad}))
                 finish = harness.bounded_run([str(tools / 'onebudgetspec-github-action'), 'finish', '--out', directory],
                                              cwd=self.repository.path, capture_output=True, text=True, check=False, env=clean_environment())
                 self.assertEqual(finish.returncode, 1, finish.stderr)
