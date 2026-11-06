@@ -36,7 +36,7 @@ comment create. The full history lets local git prove each saved commit's ancest
 | `budget-files` | `**/budgets.yaml` | Globs, separated by commas or newlines. Directories named `fixture`, `fixtures`, `__fixtures__`, `testdata` or `conformance` are never production budgets. |
 | `labels` | `ci-report` | Declare a budget measurable in this job. A runnable budget without one still runs; a labelled one that cannot run gets a diagnostic. The job's telemetry carries these labels. |
 | `artifact-name` | `budget-results` | The artifact holding the results and the rolling history. |
-| `enforcement-exclude-labels` | empty | Budgets carrying one of these are report-only: they run once and keep their verdict and flags, and never fail the job. |
+| `enforcement-exclude-labels` | empty | Budgets carrying one of these are report-only: they run once and keep their verdict and flags, and never fail the job. One whose measurement fails has no verdict: its row is unavailable, with the failure's message as the reason. |
 
 ### What runs
 
@@ -44,6 +44,10 @@ The whole catalog gets one row. A budget runs exactly once through ordinary `one
 original command, labels and threshold, unless its own argv shows it cannot run here: its program is missing, or a
 relative path it reads is absent, as when a failed predecessor never saved that telemetry. Then its row says so. A
 missing label is never a reason. Nothing is rerun to fill a row.
+
+An argv cannot show everything a command needs: `bash scripts/figures.sh` may need a tool only a release job has. Such a
+command runs and fails. If its budget is report-only, its row is unavailable with the failure's message as the reason;
+if it is enforced, the row is the ordinary `error` and fails the job.
 
 A command reading this tool's own telemetry (`onebudgetspec-github-action telemetry ... --input PATH`) runs last. The
 measured interval runs from cold install through the checks, the history read, the comment and the main result
@@ -54,7 +58,8 @@ the history. A repository with no such command uploads once, to `<artifact-name>
 
 ### What fails the job
 
-An enforced budget over its threshold, a measurement error, or an invalid budgets file: the ordinary exits 1, 3 and 2.
+An enforced budget over its threshold, an enforced budget's measurement error, or an invalid budgets file: the ordinary
+exits 1, 3 and 2.
 A missing baseline, a failed comment, an install failure, a refused credential and a failed upload each give a reason
 in the report and change nothing. A budget command refused by a GitHub rate limit or credential is an unavailable row,
 not an error.

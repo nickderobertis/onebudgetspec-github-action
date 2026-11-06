@@ -240,6 +240,104 @@ class Lifecycle(Journey):
         enforced = self.base(self.repository.commit('default'), inputs={'token': 'real-token'})
         self.assertEqual(enforced.exit_code, 1)
 
+    def release_tail_catalog(self, *others):
+        """A command the argv check passes, that needs a tool only a release job has."""
+        self.repository.write('scripts/figures.sh', f'{COUNT} echo "onevcs is not on PATH" >&2\nexit 1\n')
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('steady', reported(5), {}),
+            ('release-figure', ['bash', 'scripts/figures.sh'], {'labels': ['provisional']}),
+            *others,
+        ]))
+
+    def test_a_failing_report_only_command_is_unavailable_with_its_own_message(self):
+        self.release_tail_catalog(
+            ('own-failure', ['onebudgetspec-github-action', 'telemetry', '--metric', 'no-such-metric',
+                             '--input', '.telemetry/own.json'], {'labels': ['provisional']}),
+        )
+        base = self.repository.commit('catalog')
+        job = self.pull_request(base, base)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(self.executed(), ['release-figure', 'steady'], 'it still ran, once')
+
+        saved = job.saved('budget-run.json')
+        self.assertEqual({r['id']: r['verdict'] for r in saved['results']['results']}, {'steady': 'within'})
+        reasons = {row['id']: row['reason'] for row in saved['unavailable']}
+        self.assertEqual(set(reasons), {'release-figure', 'own-failure'})
+        self.assertIn('onevcs is not on PATH', reasons['release-figure'])
+        # A command reading this job's own telemetry fails later, and reads the same way.
+        self.assertIn('no-such-metric', reasons['own-failure'])
+
+        rows = job.rows()
+        self.assertNotIn('verdict', rows['release-figure'])
+        self.assertIn('onevcs is not on PATH', rows['release-figure']['unavailable'])
+        body = self.host.comments[0]['body']
+        comment_row = next(line for line in body.splitlines() if 'release-figure' in line and line.startswith('|'))
+        self.assertIn('onevcs is not on PATH', comment_row)
+        self.assertIn('unavailable', comment_row)
+        self.assertNotIn('| error', comment_row)
+
+    def test_a_base_run_whose_report_only_commands_all_failed_saves_no_measurement(self):
+        self.release_tail_catalog()
+        first = self.base(self.repository.commit('catalog'))
+        self.assertEqual(first.exit_code, 0, first.stdout)
+        self.assertEqual(len(self.history_of(first.run_id)['runs']), 1, 'steady measured, so it is history')
+
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('release-figure', ['bash', 'scripts/figures.sh'], {'labels': ['provisional']}),
+        ]))
+        alone = self.base(self.repository.commit('nothing else'))
+        self.assertEqual(alone.exit_code, 0, alone.stdout)
+        self.assertIsNone(self.history_of(alone.run_id))
+        self.assertIn('no rolling file saved', alone.markdown())
+
+    def test_a_failing_enforced_command_stays_an_error_and_fails_the_job(self):
+        enforced = ['bash', '-c', f'{COUNT} echo "onevcs is not on PATH" >&2; exit 1']
+        self.release_tail_catalog(
+            ('enforced-figure', enforced, {}),
+            ('other-label-figure', enforced, {'labels': ['not-excluded']}),
+        )
+        base = self.repository.commit('catalog')
+        job = self.pull_request(base, base)
+        self.assertEqual(job.exit_code, 3, job.stdout)
+
+        saved = job.saved('budget-run.json')
+        results = {r['id']: r for r in saved['results']['results']}
+        self.assertEqual([row['id'] for row in saved['unavailable']], ['release-figure'])
+        for budget in ('enforced-figure', 'other-label-figure'):
+            self.assertEqual(results[budget]['verdict'], 'error')
+            self.assertIn('onevcs is not on PATH', results[budget]['error'])
+            self.assertEqual(job.rows()[budget]['verdict'], 'error')
+        verdicts = [row.get('verdict') for row in job.saved('comparison-report.json')['rows']]
+        self.assertEqual(verdicts[:2], ['error', 'error'], 'failed rows lead')
+
+        # With no exclusion, the very command that was report-only is an enforced error.
+        everything = self.pull_request(base, base, inputs={'token': 'real-token'})
+        self.assertEqual(everything.exit_code, 3, everything.stdout)
+        self.assertEqual(everything.rows()['release-figure']['verdict'], 'error')
+
+    def test_a_report_only_budget_that_measures_keeps_its_verdict_and_flags(self):
+        self.repository.write('values-shadow', '10\n')
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('shadow', from_data(), {'threshold': 40, 'labels': ['provisional']}),
+        ]))
+        self.repository.commit('catalog')
+        for _ in range(6):
+            base = self.base()
+        self.repository.write('values-shadow', '70\n')
+        head = self.repository.commit('a regression')
+        job = self.pull_request(head, base.sha)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+
+        rows = job.rows()
+        self.assertEqual(rows['shadow']['verdict'], 'over')
+        self.assertEqual(rows['shadow']['current'], 70.0)
+        self.assertTrue(rows['shadow']['flag'], rows['shadow'])
+        self.assertEqual(job.saved('budget-run.json')['unavailable'], [])
+        comment_row = next(line for line in self.host.comments[0]['body'].splitlines()
+                           if 'shadow' in line and line.startswith('|'))
+        self.assertIn('report-only', comment_row)
+        self.assertIn('over', comment_row)
+
     def test_invalid_budgets_and_inputs_are_ordinary_refusals(self):
         self.repository.write('budgets.yaml', 'schema_version: 1\nbudgets: [{unknown: key}]\n')
         job = self.base(self.repository.commit('broken file'))
@@ -588,7 +686,7 @@ class History(Journey):
                          'with every gh api call on record the same job has its number')
         for budget, read, expectation in (
             ('tolerates-failure', f'{refused} 2>&1 || true;', 'within'),
-            ('fails', f'{refused} || exit 1;', 'error'),
+            ('fails', f'{refused} || exit 1;', 'report-only measurement failed'),
         ):
             with self.subTest(budget):
                 self.repository.write('budgets.yaml', budgets_yaml([*catalog, (budget, reported(1, read), {'labels': ['provisional']})]))
@@ -598,7 +696,11 @@ class History(Journey):
                 self.assertIsNone(metric['value'], 'no number stands in for an unknown count')
                 self.assertIn('no record of its requests', metric['unavailable'])
                 rows = job.rows()
-                self.assertEqual(rows[budget]['verdict'], expectation)
+                if expectation == 'within':
+                    self.assertEqual(rows[budget]['verdict'], expectation)
+                else:
+                    self.assertNotIn('verdict', rows[budget])
+                    self.assertIn(expectation, rows[budget]['unavailable'])
                 self.assertIn('no record of its requests', rows['own-requests']['unavailable'])
                 self.assertNotIn('verdict', rows['own-requests'])
                 self.assertEqual(rows['counted']['verdict'], 'within')
@@ -1105,7 +1207,8 @@ class Degraded(Journey):
         rows = {row['id']: row for row in saved}
         self.assertIn('not saved', rows['blocked-own']['unavailable'])
         self.assertIn('leaves the checkout', rows['escaping-own']['unavailable'])
-        self.assertEqual(rows['no-input']['verdict'], 'error', 'an ordinary command, report-only here')
+        self.assertNotIn('verdict', rows['no-input'], 'an ordinary command, report-only here')
+        self.assertIn('report-only measurement failed', rows['no-input']['unavailable'])
         self.assertEqual(rows['by-relative-path']['current'], 2.0)
         self.assertIn('scripts/absent.sh', rows['missing-relative-path']['unavailable'])
 
@@ -1120,7 +1223,9 @@ class Degraded(Journey):
         ]))
         job = self.base(self.repository.commit('catalog'))
         self.assertEqual(job.exit_code, 0, job.stdout)
-        self.assertEqual(job.rows()['host-refuses']['verdict'], 'error', 'a plain 404 is the measurement failing')
+        refused_row = job.rows()['host-refuses']
+        self.assertNotIn('verdict', refused_row)
+        self.assertIn('report-only measurement failed', refused_row['unavailable'], 'a plain 404 is the measurement failing')
         self.assertEqual(self.host.count('commits/[ab]'), 2)
 
         # No gh on the runner, and a gh that cannot start: both are that budget's own result.
