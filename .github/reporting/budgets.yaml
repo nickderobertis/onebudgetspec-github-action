@@ -3,8 +3,9 @@ budgets:
   - id: action-report-github-api-requests-per-run
     description: >-
       Budget job GitHub API requests per run, REST and GraphQL with retries and pages: one complete PR
-      or base job with 100 budget rows, one rolling file of 20 commits and every runnable ordinary
-      command's reads. Artifact and storage transfers are reported beside it and not counted in it.
+      or base job with 49 budget rows and one rolling file of 20 commits. The count includes the CI-time
+      reads budget commands make on a pull request and the merged-run reads of a base push. Artifact and
+      storage transfers are reported beside it and not counted in it.
     labels: [ci-report]
     measure: reported
     command: [onebudgetspec-github-action, telemetry, --metric, report-github-api-requests-per-run, --input, .telemetry/report-job.json]

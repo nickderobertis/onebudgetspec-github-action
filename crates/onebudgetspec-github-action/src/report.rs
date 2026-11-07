@@ -1,5 +1,5 @@
-//! `report`: ordinary checks, then one saved result, compared and delivered through core and
-//! the plugin. No scalar is computed here and no measurement is run to fill a row.
+//! `report`: settle every budget from saved results or an ordinary check, then save one result
+//! compared through core. No scalar is computed here and no measurement is run to fill a row.
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -7,18 +7,20 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use onebudgetspec_core::comparison::{
-    BudgetRun, ComparisonInput, ComparisonReport, RollingHistory, UnavailableBudget,
+    BudgetRun, ComparisonInput, ComparisonReport, ResultNote, RollingHistory, UnavailableBudget,
     validate_history,
 };
 use onebudgetspec_core::delivery::{DeliveryResult, HistoricalFlag, PublishRequest};
-use onebudgetspec_core::{CheckReport, ListedBudget, exit, render_markdown};
+use onebudgetspec_core::{CheckReport, CheckResult, ListedBudget, Verdict, exit, render_markdown};
 use serde_json::{Value, json};
 
 use crate::catalog::{self, Disposition};
 use crate::cli::{Mode, ReportArgs, ReproduceArgs};
 use crate::finish;
+use crate::merged;
 use crate::proxy::{self, Wiring};
-use crate::state::{self, Failure, Phases, RollingDecision, file};
+use crate::saved::{self, NO_SAVED_RESULT};
+use crate::state::{self, Destination, Failure, Phases, RollingDecision, file};
 use crate::tools;
 
 /// The base history holds at most this many commits.
@@ -26,6 +28,9 @@ const MAX_HISTORY_COMMITS: usize = 20;
 
 /// Why a base run leaves the history as it found it.
 const NOTHING_MEASURED: &str = "no rolling file saved: this run completed no measurement, so the next base run reads the one before it";
+
+/// An own budget's row in the main results, which are saved before its telemetry exists.
+const OWN_NOT_JUDGED: &str = "not judged when this file was saved: this job's own telemetry ends with this upload, and its verdict is in the completed results";
 
 /// The current time as Unix seconds.
 pub fn now() -> f64 {
@@ -60,7 +65,7 @@ pub fn check_partitioned(
         .collect();
     let (report_only, enforced): (Vec<_>, Vec<_>) = selected
         .iter()
-        .partition(|budget| is_report_only(&budget.labels, excluded));
+        .partition(|budget| catalog::carries_any(&budget.labels, excluded));
     let mut checked = Checked {
         report: CheckReport {
             schema_version: 1,
@@ -94,31 +99,38 @@ pub fn check_partitioned(
     let log = proxy::read_log(&wiring.log);
     let unavailable = &mut checked.unavailable;
     checked.report.results.retain(|result| {
-        if result.verdict != onebudgetspec_core::Verdict::Error {
-            return true;
+        let blocked = proxy::blocked_reason(&log, &result.id);
+        match unmeasured_reason(result, blocked, excluded) {
+            Some(reason) => {
+                unavailable.push(UnavailableBudget {
+                    file: result.file.clone(),
+                    id: result.id.clone(),
+                    reason,
+                });
+                false
+            }
+            None => true,
         }
-        let reason = proxy::blocked_reason(&log, &result.id).or_else(|| {
-            is_report_only(&result.labels, excluded).then(|| {
-                let message = result.error.as_deref().unwrap_or("no reason given");
-                format!("report-only measurement failed: {message}")
-            })
-        });
-        let Some(reason) = reason else {
-            return true;
-        };
-        unavailable.push(UnavailableBudget {
-            file: result.file.clone(),
-            id: result.id.clone(),
-            reason,
-        });
-        false
     });
     checked
 }
 
-/// Whether a budget with `labels` is excluded from enforcement, as core's exit decides it.
-fn is_report_only(labels: &[String], excluded: &[String]) -> bool {
-    labels.iter().any(|label| excluded.contains(label))
+/// Why an errored `result` reads as unavailable rather than as the ordinary `error`: GitHub
+/// refused its reads, or it is report-only.
+fn unmeasured_reason(
+    result: &CheckResult,
+    blocked: Option<String>,
+    excluded: &[String],
+) -> Option<String> {
+    if result.verdict != Verdict::Error {
+        return None;
+    }
+    blocked.or_else(|| {
+        catalog::carries_any(&result.labels, excluded).then(|| {
+            let message = result.error.as_deref().unwrap_or("no reason given");
+            format!("report-only measurement failed: {message}")
+        })
+    })
 }
 
 fn ordinary_check(
@@ -163,13 +175,25 @@ pub fn compare(core: &Path, input: &Path) -> Result<ComparisonReport, Failure> {
             .arg(input),
         "onebudgetspec report",
     )?;
-    serde_json::from_slice(&output.stdout).map_err(|error| {
+    let mut report: ComparisonReport = serde_json::from_slice(&output.stdout).map_err(|error| {
         Failure::invalid(format!(
             "onebudgetspec report refused {}: {}{error}",
             input.display(),
             String::from_utf8_lossy(&output.stderr)
         ))
-    })
+    })?;
+    for row in &mut report.rows {
+        // Core appends each base commit's shortfall to a row's reason, which on a row with no
+        // figure would name causes this reason exists not to claim. `baseline_n` still shows them.
+        if row
+            .unavailable
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with(NO_SAVED_RESULT))
+        {
+            row.unavailable = Some(NO_SAVED_RESULT.to_owned());
+        }
+    }
+    Ok(report)
 }
 
 /// Save the comparison and the Markdown beside it, diagnostics appended.
@@ -191,6 +215,7 @@ struct Config<'a> {
     base_sha: String,
     excluded: Vec<String>,
     job_labels: Vec<String>,
+    omitted: Vec<String>,
 }
 
 impl<'a> Config<'a> {
@@ -215,8 +240,21 @@ impl<'a> Config<'a> {
         if args.mode == Mode::Base && args.base_ref.trim().is_empty() {
             return Err(invalid("--mode base needs --base-ref"));
         }
+        if !args.saved_results_artifacts.is_empty() {
+            if matches!(args.mode, Mode::Base | Mode::Privileged) {
+                return Err(invalid(
+                    "--saved-results-artifacts applies only to a pull-request or read-only run",
+                ));
+            }
+            if args.saved_results_dir.is_none() {
+                return Err(invalid(
+                    "--saved-results-artifacts needs --saved-results-dir",
+                ));
+            }
+        }
         let excluded = catalog::split_list(&args.enforcement_exclude_labels);
         let job_labels = catalog::split_list(&args.labels);
+        let omitted = catalog::split_list(&args.omit_labels);
         let pattern = |label: &String| {
             label.starts_with(|first: char| first.is_ascii_lowercase())
                 && label
@@ -226,6 +264,7 @@ impl<'a> Config<'a> {
         if let Some(bad) = excluded
             .iter()
             .chain(&job_labels)
+            .chain(&omitted)
             .find(|label| !pattern(label))
         {
             return Err(Failure::invalid(format!(
@@ -243,6 +282,7 @@ impl<'a> Config<'a> {
             base_sha,
             excluded,
             job_labels,
+            omitted,
         })
     }
 }
@@ -255,6 +295,75 @@ fn git_head() -> Result<String, Failure> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Every budget's part in this run, settled: what it took, then its commands run.
+struct Settled {
+    current: BudgetRun,
+    own: Vec<(String, PathBuf)>,
+    invocation_exit: Option<i32>,
+    diagnostics: Vec<String>,
+    /// The looked-up workflow the history read still needs, if it reads the host.
+    workflow: Option<Result<u64, String>>,
+}
+
+fn settle_rows(
+    config: &Config<'_>,
+    budgets: &[ListedBudget],
+    core_cli: &Path,
+    wiring: &Wiring,
+    phases: &mut Phases,
+) -> Settled {
+    let args = config.args;
+    let (shown, omitted_line) = shown_budgets(config, budgets);
+    let (mut runnable, own, mut unavailable, mut diagnostics) =
+        sort_catalog(config, &shown, wiring);
+    diagnostics.extend(omitted_line);
+    let phase_start = now();
+    let workflow = host_workflow(config, wiring);
+    let mut taken = Taken::default();
+    if args.mode == Mode::Base {
+        take_merged_run(
+            config,
+            wiring,
+            workflow.as_ref(),
+            &shown,
+            (&mut runnable, &own, &mut unavailable),
+            &mut taken,
+            &mut diagnostics,
+        );
+    }
+    phases.archive = now() - phase_start;
+    if !args.saved_results_artifacts.is_empty() {
+        take_saved_results(
+            config,
+            budgets,
+            &shown,
+            (&mut runnable, &own, &mut unavailable),
+            &mut taken,
+            &mut diagnostics,
+        );
+    }
+    let phase_start = now();
+    let mut checked = check_partitioned(
+        core_cli,
+        wiring,
+        &shown,
+        &runnable,
+        &config.excluded,
+        denies_credentials(args.mode),
+    );
+    phases.check = now() - phase_start;
+    checked.report.results.append(&mut taken.results);
+    let invocation_exit = checked.invocation_exit;
+    let current = current_run(config, budgets.to_vec(), checked, unavailable, taken.notes);
+    Settled {
+        current,
+        own,
+        invocation_exit,
+        diagnostics,
+        workflow,
+    }
 }
 
 /// `report`.
@@ -287,23 +396,17 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
         install: args.install_seconds,
         ..Phases::default()
     };
-    let (runnable, own, unavailable, mut diagnostics) = sort_catalog(&config, &budgets, &wiring);
-    let phase_start = now();
-    let checked = check_partitioned(
-        &core_cli,
-        &wiring,
-        &budgets,
-        &runnable,
-        &config.excluded,
-        denies_credentials(args.mode),
-    );
-    phases.check = now() - phase_start;
-    let invocation_exit = checked.invocation_exit;
-    let current = current_run(&config, budgets.clone(), checked, unavailable);
+    let Settled {
+        current,
+        own,
+        invocation_exit,
+        mut diagnostics,
+        workflow,
+    } = settle_rows(&config, &budgets, &core_cli, &wiring, &mut phases);
 
     let phase_start = now();
-    let (prior, history_cost) = read_history(&config, &wiring, &mut diagnostics);
-    phases.archive = now() - phase_start;
+    let (prior, history_cost) = read_history(&config, &wiring, workflow, &mut diagnostics);
+    phases.archive += now() - phase_start;
     diagnostics.extend(mode_diagnostics(args, &main_artifact(args, &own)));
     let rolling_decision =
         decide_rolling(&config, &current, invocation_exit, &own, prior.is_some());
@@ -320,13 +423,12 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
     };
     write_rolling(out, rolling.as_ref())?;
     state::write_json(&out.join(file::BUDGET_RUN), &current)?;
-    let saved_diagnostics = compare_and_deliver(
+    compare_and_save(
         &core_cli,
-        &wiring,
         args,
-        current,
+        without_omitted(&current, &config.omitted),
         prior,
-        diagnostics,
+        &diagnostics,
         &mut phases,
     )?;
 
@@ -335,7 +437,9 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
         "phases": phases.to_json(),
         "own": own.iter().map(|(id, input)| json!({"id": id, "input": input})).collect::<Vec<_>>(),
         "job_labels": config.job_labels,
-        "diagnostics": saved_diagnostics,
+        "diagnostics": diagnostics,
+        "omit_labels": config.omitted,
+        "destination": destination(args).map(|to| json!({"change_url": to.change_url, "key": to.key})),
         "invocation_exit": invocation_exit,
         "phased": args.phased,
         "deny_credentials": denies_credentials(args.mode),
@@ -361,6 +465,14 @@ pub fn run(args: &ReportArgs) -> Result<ExitCode, Failure> {
     Ok(answer)
 }
 
+/// Where this run's one comment goes, if it posts one.
+fn destination(args: &ReportArgs) -> Option<Destination> {
+    (args.mode == Mode::PullRequest).then(|| Destination {
+        change_url: args.change_url.clone(),
+        key: args.key.clone(),
+    })
+}
+
 /// Where the main results go. With own commands still to run, the final upload takes the name
 /// the history reads, so a failure there can never destroy these immutable results.
 fn main_artifact(args: &ReportArgs, own: &[(String, PathBuf)]) -> String {
@@ -380,6 +492,7 @@ fn current_run(
     budgets: Vec<ListedBudget>,
     checked: Checked,
     mut unavailable: Vec<UnavailableBudget>,
+    result_notes: Vec<ResultNote>,
 ) -> BudgetRun {
     let args = config.args;
     unavailable.extend(checked.unavailable);
@@ -400,7 +513,18 @@ fn current_run(
         results: checked.report,
         unavailable,
         enforcement_exclude_labels: config.excluded.clone(),
+        result_notes,
     }
+}
+
+/// `run` as the comparison reads it: core gives every catalog entry a row, so an omitted budget
+/// leaves this copy's catalog and stays in the saved `budget-run.json`.
+pub fn without_omitted(run: &BudgetRun, omitted: &[String]) -> BudgetRun {
+    let mut shown = run.clone();
+    shown
+        .catalog
+        .retain(|budget| !catalog::carries_any(&budget.labels, omitted));
+    shown
 }
 
 fn mode_diagnostics(args: &ReportArgs, main_artifact: &str) -> Vec<String> {
@@ -431,17 +555,16 @@ fn mode_diagnostics(args: &ReportArgs, main_artifact: &str) -> Vec<String> {
     diagnostics
 }
 
-/// Save the input, compare and render through core, deliver through the plugin, and
-/// answer with the diagnostics the saved report carries.
-fn compare_and_deliver(
+/// Save the input and the comparison of the main results. The comment posts once, from `finish`,
+/// where the job's own figure is known.
+fn compare_and_save(
     core_cli: &Path,
-    wiring: &Wiring,
     args: &ReportArgs,
     current: BudgetRun,
     prior: Option<RollingHistory>,
-    diagnostics: Vec<String>,
+    diagnostics: &[String],
     phases: &mut Phases,
-) -> Result<Vec<String>, Failure> {
+) -> Result<(), Failure> {
     let baseline: Vec<BudgetRun> = prior
         .map(|history| history.runs)
         .unwrap_or_default()
@@ -458,26 +581,9 @@ fn compare_and_deliver(
 
     let phase_start = now();
     let mut report = compare(core_cli, &input_path)?;
-    let plain = report.diagnostics.clone();
-    report.diagnostics.extend_from_slice(&diagnostics);
-    let body = render_markdown(&report);
+    save_report(&args.out, &mut report, diagnostics)?;
     phases.render = now() - phase_start;
-
-    let mut saved = diagnostics;
-    let phase_start = now();
-    if args.mode == Mode::PullRequest {
-        let delivered = deliver(wiring, args, &report, body);
-        saved.extend(delivered.diagnostic.clone());
-        if !delivered.delivered {
-            saved.push(
-                "report not delivered; this summary and the saved artifact remain available".into(),
-            );
-        }
-    }
-    phases.delivery = now() - phase_start;
-    report.diagnostics = plain;
-    save_report(&args.out, &mut report, &saved)?;
-    Ok(saved)
+    Ok(())
 }
 
 /// The wiring of the run whose state directory is `state_directory`.
@@ -527,14 +633,13 @@ fn sort_catalog<'a>(
                 unavailable.push(UnavailableBudget {
                     file: budget.file.clone(),
                     id: budget.id.clone(),
-                    reason: "measured once this report's results are saved: its completed verdict is in the saved artifact".into(),
+                    reason: OWN_NOT_JUDGED.into(),
                 });
             }
             Disposition::Unavailable(reason) => {
-                if budget
-                    .labels
-                    .iter()
-                    .any(|label| config.job_labels.contains(label))
+                // With saved results asked for, a row left with none claims no cause.
+                if config.args.saved_results_artifacts.is_empty()
+                    && catalog::carries_any(&budget.labels, &config.job_labels)
                 {
                     diagnostics.push(format!(
                         "{} is labelled as measurable in this job, yet {reason}",
@@ -552,11 +657,220 @@ fn sort_catalog<'a>(
     (runnable, own, unavailable, diagnostics)
 }
 
+/// The budgets that get a row, and the one line counting the rest.
+fn shown_budgets(
+    config: &Config<'_>,
+    budgets: &[ListedBudget],
+) -> (Vec<ListedBudget>, Option<String>) {
+    let (omitted, shown): (Vec<_>, Vec<_>) = budgets
+        .iter()
+        .cloned()
+        .partition(|budget| catalog::carries_any(&budget.labels, &config.omitted));
+    let labels: Vec<&str> = config
+        .omitted
+        .iter()
+        .filter(|label| omitted.iter().any(|budget| budget.labels.contains(label)))
+        .map(String::as_str)
+        .collect();
+    let label_word = if labels.len() == 1 { "label" } else { "labels" };
+    let labels = labels.join(", ");
+    let line = match omitted.len() {
+        0 => None,
+        1 => Some(format!(
+            "1 budget is left out because a pull request cannot measure it ({label_word} {labels})."
+        )),
+        count => Some(format!(
+            "{count} budgets are left out because a pull request cannot measure them ({label_word} {labels})."
+        )),
+    };
+    (shown, line)
+}
+
+/// What rows came from elsewhere than a command run in this job.
+#[derive(Default)]
+struct Taken {
+    results: Vec<CheckResult>,
+    notes: Vec<ResultNote>,
+}
+
+/// The parts of `sort_catalog`'s answer a taken result changes.
+type Rows<'r, 'a> = (
+    &'r mut BTreeSet<&'a str>,
+    &'r [(String, PathBuf)],
+    &'r mut Vec<UnavailableBudget>,
+);
+
+/// Settle `budget` with `result`: its command does not run and it has no unavailable reason.
+fn take(
+    result: CheckResult,
+    budget: &ListedBudget,
+    runnable: &mut BTreeSet<&str>,
+    unavailable: &mut Vec<UnavailableBudget>,
+    taken: &mut Taken,
+) {
+    runnable.remove(budget.id.as_str());
+    unavailable.retain(|row| row.file != budget.file || row.id != budget.id);
+    taken.results.push(result);
+}
+
+/// A base push: each row not this job's own takes the merged pull request's figure, if it has one.
+fn take_merged_run(
+    config: &Config<'_>,
+    wiring: &Wiring,
+    workflow: Option<&Result<u64, String>>,
+    shown: &[ListedBudget],
+    (runnable, own, unavailable): Rows<'_, '_>,
+    taken: &mut Taken,
+    diagnostics: &mut Vec<String>,
+) {
+    // A run naming its saved history reads nothing from the host.
+    let Some(workflow) = workflow else {
+        return;
+    };
+    let args = config.args;
+    let read = workflow
+        .as_ref()
+        .map_err(String::clone)
+        .and_then(|workflow| {
+            merged::read(
+                wiring,
+                &args.repo,
+                &config.head_sha,
+                *workflow,
+                &args.artifact_name,
+            )
+        });
+    let run = match read {
+        Ok(run) => run,
+        Err(reason) => {
+            diagnostics.push(format!(
+                "merged pull request's figures not read, so each row stands as this job has it: {reason}"
+            ));
+            return;
+        }
+    };
+    let mut count = 0;
+    for budget in shown {
+        if own.iter().any(|(id, _)| *id == budget.id) {
+            continue;
+        }
+        // An errored result holds no figure to carry, and the merge is not this job's failure.
+        let Some(found) = saved::latest_for(&run.results, budget)
+            .filter(|result| result.verdict != Verdict::Error)
+        else {
+            continue;
+        };
+        match saved::adopted(found, budget) {
+            Ok(result) => {
+                take(result, budget, runnable, unavailable, taken);
+                count += 1;
+            }
+            Err(reason) => diagnostics.push(format!(
+                "{}'s figure from {} ignored: {reason}",
+                budget.id, run.source
+            )),
+        }
+    }
+    diagnostics.push(format!("{count} rows are the figures of {}", run.source));
+}
+
+/// A pull request: each row not this job's own takes its saved result, keeping its verdict; what
+/// nothing can settle reads as having none, claiming no cause.
+fn take_saved_results(
+    config: &Config<'_>,
+    budgets: &[ListedBudget],
+    shown: &[ListedBudget],
+    (runnable, own, unavailable): Rows<'_, '_>,
+    taken: &mut Taken,
+    diagnostics: &mut Vec<String>,
+) {
+    let args = config.args;
+    if args.saved_results_download == "failure" {
+        diagnostics.push(format!(
+            "downloading the {} artifacts failed, so this report holds what arrived",
+            args.saved_results_artifacts
+        ));
+    }
+    let results = args
+        .saved_results_dir
+        .as_deref()
+        .map(|directory| saved::read(directory, diagnostics))
+        .unwrap_or_default();
+    let unknown: BTreeSet<&str> = results
+        .iter()
+        .map(|result| result.id.as_str())
+        .filter(|id| !budgets.iter().any(|budget| budget.id == *id))
+        .collect();
+    for id in unknown {
+        diagnostics.push(format!(
+            "saved result {id} ignored: the catalog holds no such budget"
+        ));
+    }
+    let head_committed = (!results.is_empty())
+        .then(|| saved::committer_date(&config.head_sha))
+        .transpose()
+        .unwrap_or_else(|reason| {
+            diagnostics.push(format!(
+                "cannot tell replayed results from fresh ones, so none is marked: the head {}: {reason}",
+                config.head_sha
+            ));
+            None
+        });
+    for row in unavailable
+        .iter_mut()
+        .filter(|row| !own.iter().any(|(id, _)| *id == row.id))
+    {
+        NO_SAVED_RESULT.clone_into(&mut row.reason);
+    }
+    for budget in shown {
+        if own.iter().any(|(id, _)| *id == budget.id) {
+            continue;
+        }
+        let Some(found) = saved::latest_for(&results, budget) else {
+            continue;
+        };
+        let result = match saved::adopted(found, budget) {
+            Ok(result) => result,
+            Err(reason) => {
+                diagnostics.push(format!("saved result {} ignored: {reason}", budget.id));
+                continue;
+            }
+        };
+        if let Some(reason) = unmeasured_reason(&result, None, &config.excluded) {
+            runnable.remove(budget.id.as_str());
+            unavailable.retain(|row| row.file != budget.file || row.id != budget.id);
+            unavailable.push(UnavailableBudget {
+                file: budget.file.clone(),
+                id: budget.id.clone(),
+                reason,
+            });
+            continue;
+        }
+        taken
+            .notes
+            .extend(head_committed.and_then(|date| saved::replay_note(&result, date)));
+        take(result, budget, runnable, unavailable, taken);
+    }
+}
+
+/// This run's workflow, when anything will read the host for it; looked up once, at most.
+fn host_workflow(config: &Config<'_>, wiring: &Wiring) -> Option<Result<u64, String>> {
+    let args = config.args;
+    if args.mode == Mode::Privileged || args.base_ref.is_empty() || args.saved_history.is_some() {
+        return None;
+    }
+    Some(match args.workflow {
+        Some(workflow) => Ok(workflow),
+        None => look_up_workflow(args, wiring),
+    })
+}
+
 /// The prior rolling history, or nothing with its reasons in `diagnostics`, and its
 /// `QueryCost` when the plugin read it.
 fn read_history(
     config: &Config<'_>,
     wiring: &Wiring,
+    workflow: Option<Result<u64, String>>,
     diagnostics: &mut Vec<String>,
 ) -> (Option<RollingHistory>, Value) {
     let args = config.args;
@@ -570,7 +884,10 @@ fn read_history(
     if let Some(saved) = &args.saved_history {
         return (read_saved_history(config, saved, diagnostics), Value::Null);
     }
-    match read_host_history(config, wiring, diagnostics) {
+    let answer = workflow
+        .unwrap_or_else(|| Err("no workflow names the history to read".into()))
+        .and_then(|workflow| read_host_history(config, wiring, workflow, diagnostics));
+    match answer {
         Ok(answer) => answer,
         Err(reason) => {
             diagnostics.push(format!("baseline unavailable: {reason}"));
@@ -633,13 +950,10 @@ fn read_saved_history(
 fn read_host_history(
     config: &Config<'_>,
     wiring: &Wiring,
+    workflow: u64,
     diagnostics: &mut Vec<String>,
 ) -> Result<(Option<RollingHistory>, Value), String> {
     let args = config.args;
-    let workflow = match args.workflow {
-        Some(workflow) => workflow,
-        None => look_up_workflow(args, wiring)?,
-    };
     let plugin = tools::locate(tools::PLUGIN).map_err(|failure| failure.to_string())?;
     let path = state::state_directory(&args.out).join("prior-rolling.json");
     let mut command = Command::new(plugin);
@@ -774,20 +1088,21 @@ fn rolling_history(
 pub fn settle_pending_rolling(
     out: &Path,
     decision: RollingDecision,
-    input: &ComparisonInput,
+    baseline: &[BudgetRun],
+    current: &BudgetRun,
     own_check_exit: Option<i32>,
     diagnostics: &mut Vec<String>,
 ) -> Result<(), Failure> {
     let prior = match decision {
         RollingDecision::Settled => return Ok(()),
         RollingDecision::PendingFresh => None,
-        RollingDecision::PendingOnPrior => Some(input.baseline.clone()),
+        RollingDecision::PendingOnPrior => Some(baseline.to_vec()),
     };
-    let rolling = if own_check_exit.is_some() || !measured(&input.current) {
+    let rolling = if own_check_exit.is_some() || !measured(current) {
         diagnostics.push(NOTHING_MEASURED.into());
         None
     } else {
-        extended_history(prior, &input.current, diagnostics)
+        extended_history(prior, current, diagnostics)
     };
     write_rolling(out, rolling.as_ref())
 }
@@ -837,16 +1152,16 @@ fn write_rolling(out: &Path, rolling: Option<&RollingHistory>) -> Result<(), Fai
 }
 
 /// Hand the rendered report to the plugin, over the reporter protocol core defines.
-fn deliver(
+pub fn deliver(
     wiring: &Wiring,
-    args: &ReportArgs,
+    to: &Destination,
     report: &ComparisonReport,
     markdown: String,
 ) -> DeliveryResult {
     let request = PublishRequest {
         schema_version: 1,
-        destination: args.change_url.clone(),
-        key: args.key.clone(),
+        destination: to.change_url.clone(),
+        key: to.key.clone(),
         head_sha: report.current.head_sha.clone(),
         run_id: report.current.run_id.clone(),
         run_url: report.current.run_url.clone(),

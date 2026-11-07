@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tests/action-harne
 import yaml
 
 import harness
-from harness import Host, Job, Repository, budgets_yaml, event_pull_request
+from harness import Host, Job, Repository, budgets_yaml, check_report, check_result, event_pull_request, zipped
 
 COUNT = 'echo "$ONEBUDGETSPEC_BUDGET_ID" >> "$JOURNEY_COUNTS";'
 
@@ -154,9 +154,10 @@ class Lifecycle(Journey):
         self.assertIn('report-only', shadow_row)
         self.assertIn('over', shadow_row)
         self.assertIn('constant-baseline-change', shadow_row)
-        # The own row was unavailable while running; the saved artifact holds its verdict.
+        # The own row holds its figure and verdict on the comment, the same as the saved artifact.
         own_row = next(line for line in body.splitlines() if 'job-seconds' in line and line.startswith('|'))
-        self.assertIn('measured once', own_row)
+        self.assertIn('| within |', own_row)
+        self.assertNotIn('unavailable', own_row)
         saved = json.loads(self.host.artifact_files(job.run_id)['budget-run.json'])
         own = next(result for result in saved['results']['results'] if result['id'] == 'job-seconds')
         self.assertEqual(own['verdict'], 'within')
@@ -509,6 +510,485 @@ class Diagnostics(Journey):
         self.assertIn('cannot download', job.summary)
 
 
+NO_SAVED = 'no saved result was found on this run'
+ARTIFACTS = 'budget-check-results-*'
+SAVED_INPUTS = {'token': 'real-token', 'enforcement-exclude-labels': 'provisional', 'saved-results-artifacts': ARTIFACTS}
+LACKS_TOOL = ['tool-only-a-test-job-has', '--measure']
+
+
+class Measured(Journey):
+    """Rows settled from what this run's test jobs saved, and from the merged pull request's run."""
+
+    def measured_catalog(self):
+        """A budget a test job measures, others only it can, one this job can, and the job's own."""
+        for budget, figure in {'also-runnable': 7, 'runs-here': 9}.items():
+            self.repository.write(f'values-{budget}', f'{figure}\n')
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('also-runnable', from_data(), {}),
+            ('test-only', LACKS_TOOL, {}),
+            ('other-producer', LACKS_TOOL, {}),
+            ('runs-here', from_data(), {}),
+        ]))
+        self.repository.write('.github/reporting/budgets.yaml', budgets_yaml([
+            ('job-seconds', OWN, {'unit': 'seconds', 'threshold': 120, 'labels': ['ci-report']}),
+        ]))
+
+    def seed_history(self, commits):
+        """A rolling file of one real base run's shape, one entry per real commit, every row measured."""
+        first = self.base(self.repository.commit('catalog'))
+        self.assertEqual(first.exit_code, 0, first.stdout)
+        real = first.saved('budget-run.json')
+        heads = [first.sha] + [self.repository.commit(f'base {index}') for index in range(commits - 1)]
+        runs = []
+        for index, head in enumerate(heads):
+            results = []
+            for budget in real['catalog']:
+                results.append(check_result(budget['id'], 10 + index, file=budget['file'], labels=budget.get('labels', []),
+                                            unit=budget['unit'], threshold=budget['threshold'],
+                                            ended_at='2026-11-01T00:00:00Z'))
+            runs.append({**real, 'head_sha': head, 'run_id': str(499 - len(heads) + 1 + index), 'results': {'schema_version': 1, 'results': results},
+                         'unavailable': [], 'completed_at': f'2026-11-01T00:{index:02d}:00Z'})
+        history = {'schema_version': 1, 'repository': harness.REPOSITORY, 'base_ref': 'main', 'runs': runs}
+        self.host.artifacts.clear()
+        self.host.runs.clear()
+        self.host.add_run(499, heads[-1], minute=499)
+        self.host.attach(499, 'budget-results', zipped({'rolling-history.json': json.dumps(history)}))
+        return heads[-1]
+
+    def saved_run(self, head, base, artifacts, inputs=None, **options):
+        """A pull request whose earlier jobs saved `artifacts`, a name to its files, in this run."""
+        self.next_run += 1
+        for name, files in artifacts.items():
+            self.host.attach(self.next_run, name, zipped(files))
+        return self.pull_request(head, base, run_id=self.next_run, inputs=inputs or SAVED_INPUTS, **options)
+
+    def row_text(self, job, budget):
+        body = self.host.comments[-1]['body']
+        rows = [line for line in body.splitlines() if line.startswith('|') and f' {budget} ' in line]
+        self.assertEqual(len(rows), 1, body)
+        return rows[0]
+
+    def assert_no_saved_result(self, job, budget, baseline_n=6):
+        row = job.rows()[budget]
+        self.assertEqual(row['unavailable'], NO_SAVED, 'exactly that, with no cause')
+        self.assertIsNone(row.get('current'), 'no value is carried forward')
+        self.assertEqual(row['baseline_n'], baseline_n)
+        self.assertEqual([item['reason'] for item in job.saved('budget-run.json')['unavailable'] if item['id'] == budget], [NO_SAVED])
+        if baseline_n >= 5:
+            self.assertEqual(row['mean'], 12.5)
+            self.assertGreater(row['sd'], 0)
+            self.assertIn(f'provisional; {NO_SAVED} |', self.row_text(job, budget))
+
+    def test_a_saved_result_replaces_the_command_and_keeps_its_verdict(self):
+        self.repository.write('values-enforced', '5\n')
+        self.repository.write('values-shadow', '5\n')
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('enforced', from_data(), {'threshold': 40}),
+            ('shadow', from_data(), {'threshold': 40, 'labels': ['provisional']}),
+        ]))
+        base = self.repository.commit('catalog')
+        shadow_over = check_report(check_result('shadow', 70, labels=['provisional'], threshold=40))
+
+        # A report-only overrun shows its verdict and fails nothing; the older duplicate loses.
+        passing = self.saved_run(base, base, {
+            'budget-check-results-a': {'one.json': check_report(check_result('enforced', 31, threshold=40, ended_at='2099-01-02T00:00:00Z'))},
+            'budget-check-results-b': {'nested/two.json': check_report(check_result('enforced', 39, threshold=40, ended_at='2099-01-01T00:00:00Z')),
+                                       'three.json': shadow_over},
+            'unrelated-artifact': {'four.json': check_report(check_result('enforced', 99, threshold=40))},
+        })
+        self.assertEqual(passing.exit_code, 0, passing.stdout)
+        self.assertEqual(self.executed(), [], 'no command ran')
+        rows = passing.rows()
+        self.assertEqual((rows['enforced']['current'], rows['enforced']['verdict']), (31.0, 'within'))
+        self.assertEqual((rows['shadow']['current'], rows['shadow']['verdict']), (70.0, 'over'))
+        self.assertIn('report-only', self.row_text(passing, 'shadow'))
+
+        # An enforced overrun fails the job through the ordinary exit.
+        failing = self.saved_run(base, base, {'budget-check-results-a': {'one.json': check_report(
+            check_result('enforced', 41, threshold=40), check_result('shadow', 1, labels=['provisional'], threshold=40))}})
+        self.assertEqual(failing.exit_code, 1, failing.stdout)
+        self.assertEqual(self.executed(), [])
+        self.assertEqual(failing.rows()['enforced']['verdict'], 'over')
+        self.assertEqual(len(self.host.comments), 1)
+
+    def test_what_a_saved_file_says_that_cannot_stand_is_a_diagnostic(self):
+        self.repository.write('values-steady', '5\n')
+        self.repository.write('budgets.yaml', budgets_yaml([
+            ('steady', from_data(), {}), ('contradicted', reported(4), {}), ('shadow-error', reported(4), {'labels': ['provisional']}),
+            ('enforced-error', LACKS_TOOL, {}),
+        ]))
+        base = self.repository.commit('catalog')
+        errored = {**check_result('shadow-error', 1, labels=['provisional']), 'verdict': 'error', 'actual': None, 'headroom': None,
+                   'headroom_percent': None, 'error': 'no such figure'}
+        job = self.saved_run(base, base, {'budget-check-results-a': {
+            'results.json': check_report(
+                check_result('steady', 3), check_result('removed-budget', 3), check_result('removed-budget', 4),
+                check_result('contradicted', 3, threshold=7), errored,
+                {**errored, 'id': 'enforced-error', 'labels': []}),
+            'not-a-report.json': '{"nothing": "here"}',
+            'notes.txt': 'not json at all',
+        }})
+        diagnostics = job.saved('comparison-report.json')['diagnostics']
+        unknown = [line for line in diagnostics if 'removed-budget' in line]
+        self.assertEqual(len(unknown), 1, 'one diagnostic per saved id the catalog does not hold')
+        self.assertTrue([line for line in diagnostics if 'not-a-report.json' in line], diagnostics)
+        self.assertFalse([line for line in diagnostics if 'notes.txt' in line], 'only *.json files are results')
+        rows = job.rows()
+        self.assertEqual(rows['steady']['current'], 3.0)
+        # A result contradicting the catalog would make core refuse the run: this row runs instead.
+        self.assertTrue([line for line in diagnostics if 'contradicted' in line], diagnostics)
+        self.assertEqual(rows['contradicted']['current'], 4.0)
+        self.assertEqual(self.executed(), ['contradicted'])
+        # A saved error reads as a command's would: report-only unavailable, enforced the ordinary exit.
+        self.assertIn('no such figure', rows['shadow-error']['unavailable'])
+        self.assertEqual(rows['enforced-error']['verdict'], 'error')
+        self.assertEqual(job.exit_code, 3, job.stdout)
+        self.assertEqual(len(self.host.comments), 1)
+
+    def test_a_result_older_than_the_head_commit_reads_as_replayed(self):
+        for budget in ('replayed', 'fresh', 'between'):
+            self.repository.write(f'values-{budget}', '1\n')
+        self.repository.write('budgets.yaml', budgets_yaml(
+            [(budget, from_data(), {}) for budget in ('replayed', 'fresh', 'between')]))
+        base = self.repository.commit('catalog', committed_at='2026-01-01T00:00:00Z')
+        self.repository.git('checkout', '--quiet', '-b', 'feature')
+        head = self.repository.commit('the pull request head', committed_at='2026-03-10T12:00:00Z')
+        # What a pull request job checks out: a merge commit newer than every result here.
+        self.repository.git('checkout', '--quiet', 'main')
+        self.repository.git('merge', '--quiet', '--no-ff', '-m', 'merge', 'feature',
+                            environment={'GIT_COMMITTER_DATE': '2026-03-10T18:00:00Z'})
+        job = self.saved_run(head, base, {'budget-check-results-a': {'results.json': check_report(
+            check_result('replayed', 3, ended_at='2026-03-09T23:00:00Z'),
+            check_result('between', 4, ended_at='2026-03-10T15:00:00Z'),
+            check_result('fresh', 5, ended_at='2026-03-10T12:30:00Z'))}})
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        rows = job.rows()
+        self.assertEqual({budget: rows[budget]['current'] for budget in rows}, {'replayed': 3.0, 'between': 4.0, 'fresh': 5.0})
+        self.assertIn('replayed from cache, measured 2026-03-09 |', self.row_text(job, 'replayed'))
+        # Newer than the head though older than the merge commit, and restored just now: both fresh.
+        self.assertNotIn('replayed', self.row_text(job, 'between'))
+        self.assertNotIn('replayed', self.row_text(job, 'fresh'))
+        self.assertEqual([note['id'] for note in job.saved('budget-run.json')['result_notes']], ['replayed'])
+
+        # A checkout without the head commit cannot judge a replay: every number stands, and it says so.
+        job = self.saved_run('0' * 40, base, {'budget-check-results-a': {'results.json': check_report(
+            check_result('replayed', 3, ended_at='2026-03-09T23:00:00Z'))}})
+        self.assertEqual(job.rows()['replayed']['current'], 3.0)
+        self.assertNotIn('replayed from cache', job.markdown())
+        self.assertIn('cannot tell replayed results from fresh ones', job.markdown())
+
+    def assert_settled_rows(self, job, shown, absent):
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(self.executed().count('runs-here'), 1, 'a command that can run here runs once')
+        rows = job.rows()
+        self.assertEqual(rows['runs-here']['current'], 9.0)
+        for budget, figure in shown.items():
+            self.assertEqual(rows[budget]['current'], figure, budget)
+        for budget in absent:
+            self.assert_no_saved_result(job, budget)
+        own = rows['job-seconds']
+        self.assertEqual(own['verdict'], 'within', 'the action\'s own telemetry budget is this job\'s figure')
+        self.assertAlmostEqual(own['current'], job.saved('report-job.json')['metrics']['report-command-seconds']['value'], places=6)
+        self.assertEqual(job.outcomes['saved-results'], 'success')
+
+    def test_absent_saved_results_read_only_as_absent(self):
+        self.measured_catalog()
+        base = self.seed_history(6)
+        self.repository.git('checkout', '--quiet', '-b', 'feature')
+        head = self.repository.commit('change')
+        # The journey's own figure, in an artifact, must not stand in for this job's.
+        journey_figure = check_result('job-seconds', 1, file='.github/reporting/budgets.yaml', labels=['ci-report'],
+                                      unit='seconds', threshold=120)
+
+        # (a) One producer failed before saving; the other's artifact arrives.
+        arrived = {'budget-check-results-linux': {'test.json': check_report(
+            check_result('also-runnable', 21), check_result('test-only', 22), journey_figure)}}
+        job = self.saved_run(head, base, arrived)
+        self.assertEqual(self.executed(), ['runs-here'], 'the arriving artifact replaced also-runnable\'s command')
+        self.assert_settled_rows(job, {'also-runnable': 21.0, 'test-only': 22.0}, ['other-producer'])
+
+        # (b) A selected target's result is absent from an artifact that did arrive.
+        job = self.saved_run(head, base, {'budget-check-results-linux': {'test.json': check_report(check_result('other-producer', 23))}})
+        self.assertEqual(self.executed(), ['also-runnable', 'runs-here'])
+        self.assert_settled_rows(job, {'other-producer': 23.0}, ['test-only'])
+
+        # (c) No artifact arrives at all: the command that can run does, once, and the rest say so.
+        job = self.saved_run(head, base, {})
+        self.assertEqual(self.executed(), ['also-runnable', 'runs-here'])
+        self.assert_settled_rows(job, {'also-runnable': 7.0}, ['test-only', 'other-producer'])
+        self.assertEqual(len(self.host.comments), 1)
+
+    def test_no_saved_result_stays_exact_beside_a_baseline_that_is_short(self):
+        self.measured_catalog()
+        base = self.repository.commit('catalog')
+        job = self.saved_run(base, base, {})
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assert_no_saved_result(job, 'test-only', baseline_n=0)
+
+        # The same run with the input empty keeps the catalog's reason, as it always has.
+        empty = self.pull_request(base, base)
+        self.assertEqual(empty.exit_code, 0, empty.stdout)
+        self.assertIn('tool-only-a-test-job-has', empty.rows()['test-only']['unavailable'])
+        self.assertNotIn(NO_SAVED, empty.markdown())
+
+    def test_a_download_that_fails_is_a_diagnostic(self):
+        self.measured_catalog()
+        base = self.repository.commit('catalog')
+        self.host.refuse_list_artifacts = True
+        job = self.saved_run(base, base, {'budget-check-results-linux': {'test.json': check_report(check_result('test-only', 2))}})
+        self.assertEqual(job.outcomes['saved-results'], 'failure')
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assert_no_saved_result(job, 'test-only', baseline_n=0)
+        self.assertIn(f'downloading the {ARTIFACTS} artifacts failed', job.markdown())
+
+    def test_omitted_budgets_run_nothing_show_nothing_and_are_counted(self):
+        self.measured_catalog()
+        extra = yaml.safe_load((self.repository.path / 'budgets.yaml').read_text())
+        for entry in extra['budgets']:
+            if entry['id'] in ('also-runnable', 'test-only'):
+                entry['labels'] = ['not-measured-on-pr']
+        self.repository.write('budgets.yaml', yaml.safe_dump(extra))
+        base = self.repository.commit('catalog')
+        inputs = {**SAVED_INPUTS, 'omit-labels': 'not-measured-on-pr, other-label'}
+        job = self.saved_run(base, base, {'budget-check-results-linux': {'test.json': check_report(
+            check_result('test-only', 2, labels=['not-measured-on-pr']))}}, inputs=inputs)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(self.executed(), ['runs-here'])
+        self.assertEqual(set(job.rows()), {'other-producer', 'runs-here', 'job-seconds'})
+        line = '2 budgets are left out because a pull request cannot measure them (label not-measured-on-pr).'
+        body = self.host.comments[-1]['body']
+        self.assertEqual(len([text for text in body.splitlines() if 'left out because' in text]), 1, body)
+        self.assertIn(line, body)
+        self.assertFalse([text for text in body.splitlines() if 'test-only' in text], 'its saved result is ignored, with no line')
+        saved = job.saved('budget-run.json')
+        self.assertEqual({budget['id'] for budget in saved['catalog']},
+                         {'also-runnable', 'test-only', 'other-producer', 'runs-here', 'job-seconds'})
+        self.assertFalse({'also-runnable', 'test-only'} & {result['id'] for result in saved['results']['results']})
+        self.assertFalse({'also-runnable', 'test-only'} & {row['id'] for row in saved['unavailable']})
+
+        # Saved input still reproduces the rows that were shown.
+        reproduced = harness.bounded_run(
+            [str(job.temp / 'onebudgetspec-action/tools/onebudgetspec-github-action'), 'reproduce',
+             '--input', str(job.out / 'comparison-input.json'), '--json'],
+            capture_output=True, text=True, check=False, env=clean_environment())
+        self.assertEqual({row['id'] for row in json.loads(reproduced.stdout)['rows']}, set(job.rows()))
+        self.assertEqual(json.loads(reproduced.stdout)['rows'], job.saved('comparison-report.json')['rows'])
+
+        # One budget, two labels matched in turn: the line's grammar follows its count.
+        single = self.pull_request(base, base, inputs={'token': 'real-token', 'omit-labels': 'absent-label'})
+        self.assertNotIn('left out because', self.host.comments[-1]['body'], 'nothing carries it, so no line')
+        self.assertEqual(len(single.rows()), 5)
+        extra['budgets'][0]['labels'] = ['first-label', 'second-label']
+        extra['budgets'][1]['labels'] = ['first-label']
+        for entry in extra['budgets'][2:]:
+            entry.pop('labels', None)
+        self.repository.write('budgets.yaml', yaml.safe_dump(extra))
+        changed = self.repository.commit('relabelled')
+        one = self.pull_request(changed, base, inputs={'token': 'real-token', 'omit-labels': 'second-label'})
+        self.assertIn('1 budget is left out because a pull request cannot measure it (label second-label).', one.markdown())
+        both = self.pull_request(changed, base, inputs={'token': 'real-token', 'omit-labels': 'first-label\nsecond-label'})
+        self.assertIn('2 budgets are left out because a pull request cannot measure them (labels first-label, second-label).',
+                      both.markdown())
+
+        # A base push omits them too, and its rolling entry's catalog keeps them.
+        self.repository.git('checkout', '--quiet', 'main')
+        pushed = self.base(changed, inputs={'token': 'real-token', 'omit-labels': 'first-label'})
+        self.assertEqual(pushed.exit_code, 0, pushed.stdout)
+        self.assertNotIn('also-runnable', self.executed())
+        self.assertNotIn('also-runnable', pushed.rows())
+        entry = self.history_of(pushed.run_id)['runs'][-1]
+        self.assertIn('also-runnable', {budget['id'] for budget in entry['catalog']})
+
+    def merged_pull_request(self, *saved_runs, squash_adds=()):
+        """A real pull request's real run or re-runs, one per `saved_runs`, then its squash onto main,
+        which also adds the budgets `squash_adds` names, whose figures that run cannot hold.
+
+        Answers its run, its head and the merge commit, with main checked out."""
+        self.measured_catalog()
+        base = self.repository.commit('catalog')
+        self.repository.git('checkout', '--quiet', '-b', 'feature')
+        head = self.repository.commit('the pull request')
+        self.next_run += 1
+        run_id = self.next_run
+        for attempt, artifacts in enumerate(saved_runs, start=1):
+            for name, files in artifacts.items():
+                self.host.attach(run_id, name, zipped(files), attempt=attempt)
+            self.pull_request(head, base, run_id=run_id, attempt=attempt, inputs=SAVED_INPUTS)
+        self.repository.git('checkout', '--quiet', 'main')
+        self.repository.git('merge', '--quiet', '--squash', 'feature')
+        catalog = yaml.safe_load((self.repository.path / 'budgets.yaml').read_text())
+        for budget in squash_adds:
+            self.repository.write(f'values-{budget}', '9\n')
+            catalog['budgets'].extend(yaml.safe_load(budgets_yaml([(budget, from_data(), {})]))['budgets'])
+        self.repository.write('budgets.yaml', yaml.safe_dump(catalog))
+        merge = self.repository.commit('squash')
+        self.host.merge_pull_request(merge, head)
+        return run_id, head, merge
+
+    def test_a_base_push_records_the_merged_pull_requests_figures(self):
+        over_100_kb = 'x' * 120_000
+        first = check_report(check_result('also-runnable', 100), check_result('test-only', 101, detail=over_100_kb))
+        newer = check_report(check_result('also-runnable', 40, detail=over_100_kb), check_result('test-only', 200),
+                             check_result('other-producer', 120, threshold=100, detail=over_100_kb),
+                             check_result('job-seconds', 1, file='.github/reporting/budgets.yaml', labels=['ci-report'],
+                                          unit='seconds', threshold=120))
+        name = 'budget-check-results-linux'
+        run_id, head, merge = self.merged_pull_request({name: {'r.json': first}}, {name: {'r.json': newer}},
+                                                       squash_adds=['added-by-the-merge'])
+
+        # A re-run left two artifacts of one name, and the listing puts the newer first.
+        self.assertEqual(len([a for a in self.host.artifacts[str(run_id)] if a['name'] == 'budget-results']), 2)
+        merged_run = json.loads(self.host.artifact_files(run_id)['budget-run.json'])
+        artifact = {result['id']: result for result in merged_run['results']['results']}
+        self.assertEqual(artifact['test-only']['actual'], 200.0)
+        self.assertIsNotNone(artifact['also-runnable']['detail'], 'the merged run\'s own artifact keeps it')
+
+        self.host.clear_requests()
+        job = self.base(merge)
+        self.assertEqual(job.exit_code, 1, 'other-producer is over, as the merged run recorded')
+        self.assertEqual(self.executed(), ['added-by-the-merge'], 'a figure the merged run holds runs no command')
+        self.assertEqual(self.host.count(f'/commits/{merge}/pulls'), 1)
+        self.assertEqual(self.host.count(rf'/runs\?event=pull_request&head_sha={head}&per_page=1'), 1)
+        self.assertEqual(self.host.count(rf'/runs/{run_id}/artifacts\?name=budget-results'), 1)
+        self.assertEqual(self.host.count('/actions/runs/[0-9]+$'), 1, 'the workflow is looked up once')
+        history = self.history_of(job.run_id)
+        entry = history['runs'][-1]
+        self.assertEqual(entry['head_sha'], merge)
+        results = {result['id']: result for result in entry['results']['results']}
+        for budget in ('also-runnable', 'test-only', 'other-producer', 'runs-here'):
+            self.assertEqual(results[budget]['actual'], artifact[budget]['actual'], budget)
+            self.assertEqual(results[budget]['verdict'], artifact[budget]['verdict'], budget)
+            self.assertEqual(results[budget]['ended_at'], artifact[budget]['ended_at'], budget)
+            self.assertIsNone(results[budget]['detail'], budget)
+        self.assertEqual(results['test-only']['actual'], 200.0, 'the newer attempt')
+        self.assertEqual(results['other-producer']['verdict'], 'over')
+        self.assertEqual(results['added-by-the-merge']['actual'], 9.0, 'the merged run held none, so it ran here')
+        own = results['job-seconds']
+        self.assertAlmostEqual(own['actual'], job.saved('report-job.json')['metrics']['report-command-seconds']['value'], places=6)
+        self.assertNotEqual(own['actual'], artifact['job-seconds']['actual'], 'this job\'s own figure')
+        self.assertLess(len(json.dumps(entry)), 20_000, 'the rolling entry stays small')
+        metric = job.saved('report-job.json')['metrics'][API_METRIC]
+        self.assertEqual(metric['value'], self.host.count(''), 'the job counted its merged-run reads')
+        self.assertIn(f'4 rows are the figures of merged pull request #1\'s run {run_id}', job.markdown())
+
+        # A later pull request reads them as its baseline.
+        self.repository.git('checkout', '--quiet', '-b', 'later')
+        later_head = self.repository.commit('a later change')
+        later = self.saved_run(later_head, merge, {})
+        rows = later.rows()
+        self.assertEqual(rows['test-only']['baseline_n'], 1)
+        self.assertEqual(rows['other-producer']['baseline_n'], 1)
+        baseline = later.saved('comparison-input.json')['baseline']
+        self.assertEqual([run['head_sha'] for run in baseline], [merge])
+        self.assertEqual({r['id']: r['actual'] for r in baseline[0]['results']['results']}['test-only'], 200.0)
+
+    def test_a_base_push_without_a_merged_run_ends_as_it_would_have(self):
+        run_id, _, merge = self.merged_pull_request({})
+        name = 'budget-results'
+
+        # An expired artifact: the listing answers and the archive is never read.
+        for artifact in self.host.artifacts[str(run_id)]:
+            artifact['expired'] = True
+        self.host.clear_requests()
+        expired = self.base(merge)
+        self.assertEqual(expired.exit_code, 0, expired.stdout)
+        self.assertIn('has expired', expired.markdown())
+        self.assertEqual(self.executed(), ['also-runnable', 'runs-here'])
+        self.assertIn('tool-only-a-test-job-has', expired.rows()['test-only']['unavailable'])
+        self.assertEqual(self.host.count('/actions/artifacts/[0-9]+/zip'), 0, 'no archive of the merged run')
+        self.assertEqual(self.host.count(f'/commits/{merge}/pulls'), 1)
+        self.assertEqual(self.host.count(rf'/runs/{run_id}/artifacts\?name={name}'), 1)
+
+        # The run has no such artifact: stops at the listing, in 3 requests.
+        self.host.artifacts[str(run_id)] = []
+        missing = self.base(merge)
+        self.assertEqual(missing.exit_code, 0, missing.stdout)
+        self.assertIn(f'run {run_id} holds no budget-results artifact', missing.markdown())
+        self.assertEqual(self.executed(), ['also-runnable', 'runs-here'])
+
+        # A commit whose pull request is open, or that has none: 1 request, as today.
+        self.host.pulls[merge] = [{'number': 2, 'merged_at': None, 'merge_commit_sha': 'other', 'head': {'sha': 'abc'}}]
+        self.host.clear_requests()
+        none = self.base(merge)
+        self.assertEqual(none.exit_code, 0, none.stdout)
+        self.assertIn(f'commit {merge} has no merged pull request', none.markdown())
+        self.assertEqual(self.host.count('/runs\\?event=pull_request'), 0)
+        self.assertEqual(self.executed(), ['also-runnable', 'runs-here'])
+        results = {r['id']: r for r in self.history_of(none.run_id)['runs'][-1]['results']['results']}
+        self.assertEqual((results['also-runnable']['actual'], results['runs-here']['actual']), (7.0, 9.0))
+        self.assertEqual(none.rows()['job-seconds']['verdict'], 'within')
+
+        # A base job with no read of its own reads the host when GitHub refuses too: still green.
+        self.host.refuse.append({'path': '/pulls$', 'status': 500, 'times': 5})
+        refused = self.base(merge)
+        self.assertEqual(refused.exit_code, 0, refused.stdout)
+        self.assertIn('merged pull request\'s figures not read', refused.markdown())
+        self.assertEqual(self.executed(), ['also-runnable', 'runs-here'])
+
+    def test_the_one_comment_holds_the_jobs_own_figure(self):
+        self.measured_catalog()
+        base = self.repository.commit('catalog')
+        job = self.saved_run(base, base, {})
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(self.host.count(r'/issues/1/comments$'), 1)
+        self.assertEqual(len(self.host.comment_write_times), 1, 'one write, once the figure is known')
+        row = self.row_text(job, 'job-seconds')
+        telemetry = job.saved('report-job.json')
+        seconds = telemetry['metrics']['report-command-seconds']
+        self.assertIn('| within |', row)
+        self.assertIn(f'{seconds["value"]:.3f}', row)
+        self.assertNotIn('measured once', self.host.comments[0]['body'])
+        # The interval the saved file records ended before the post left.
+        started = float((job.temp / 'onebudgetspec-action/started-at').read_text())
+        self.assertLess(started + seconds['value'], self.host.comment_write_times[0])
+        self.assertIn('before the comment post', seconds['detail'])
+        requests = telemetry['metrics'][API_METRIC]
+        self.assertEqual(requests['value'], self.host.count(''), 'the saved file holds the post\'s requests too')
+        self.assertRegex(requests['detail'], r'delivery=[1-9]')
+        # What the own command read was written before the post, and says so.
+        read = json.loads((self.repository.path / '.github/reporting/.telemetry/report-job.json').read_text())
+        self.assertIn('delivery=pending', read['metrics'][API_METRIC]['detail'])
+        self.assertLess(read['metrics'][API_METRIC]['value'], requests['value'])
+        # The main upload, saved before that, holds a true reason and no verdict for it.
+        main = json.loads(self.host.artifact_files(job.run_id, 'budget-results-main')['budget-run.json'])
+        self.assertEqual([row['reason'] for row in main['unavailable'] if row['id'] == 'job-seconds'][0].split(':')[0],
+                         'not judged when this file was saved')
+        # The completed comment and the completed artifact agree.
+        self.assertEqual(json.loads(self.host.artifact_files(job.run_id)['comparison-report.json'])['rows'],
+                         job.saved('comparison-report.json')['rows'])
+
+    def test_the_comment_still_posts_when_the_own_budget_cannot_judge(self):
+        self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(5), {})]))
+        no_metric = ['onebudgetspec-github-action', 'telemetry', '--metric', 'no-such-metric', '--input', '.telemetry/job.json']
+        self.repository.write('.github/reporting/budgets.yaml', budgets_yaml([
+            ('own-shadow', no_metric, {'labels': ['provisional']}),
+            ('own-enforced', no_metric, {}),
+        ]))
+        base = self.repository.commit('catalog')
+        job = self.pull_request(base, base)
+        self.assertEqual(self.host.count(r'/issues/1/comments$'), 1)
+        self.assertEqual(len(self.host.comment_write_times), 1)
+        self.assertEqual(job.exit_code, 3, job.stdout)
+        shadow, enforced = self.row_text(job, 'own-shadow'), self.row_text(job, 'own-enforced')
+        self.assertIn('| unavailable |', shadow)
+        self.assertIn('no-such-metric', shadow)
+        self.assertIn('| error |', enforced)
+        self.assertIn('no-such-metric', job.rows()['own-enforced']['unavailable'])
+        self.assertNotIn('not judged', self.host.comments[0]['body'])
+
+    def test_a_repository_with_no_own_command_posts_once_and_uploads_once(self):
+        self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(5), {})]))
+        base = self.repository.commit('catalog')
+        job = self.pull_request(base, base)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(len(self.host.comment_write_times), 1)
+        self.assertEqual(self.host.count(r'/issues/1/comments$'), 1)
+        self.assertEqual(job.outcomes['main-upload'], 'success')
+        self.assertNotIn('final-upload', job.outcomes)
+        self.assertIsNotNone(self.host.artifact_files(job.run_id))
+        self.assertIn('| steady', '\n'.join(line.replace(' / ', '| ') for line in self.host.comments[0]['body'].splitlines()))
+
+
 class Forks(Journey):
     def test_fork_gets_a_read_only_summary_and_no_credential(self):
         self.repository.write('budgets.yaml', budgets_yaml([
@@ -603,7 +1083,7 @@ class History(Journey):
         files = self.host.artifact_files(failed.run_id, 'budget-results-main')
         saved = json.loads(files['budget-run.json'])
         self.assertEqual([r['id'] for r in saved['results']['results']], ['steady'])
-        self.assertIn('measured once', next(r['reason'] for r in saved['unavailable'] if r['id'] == 'job-seconds'))
+        self.assertIn('not judged when this file was saved', next(r['reason'] for r in saved['unavailable'] if r['id'] == 'job-seconds'))
         self.assertIsNone(self.host.artifact_files(failed.run_id), 'no half-written final artifact')
         # The count saved before any upload equals everything the API received: uploads, failed
         # or not, are transfers, and were tried and recorded without entering the figure.
@@ -913,7 +1393,8 @@ class History(Journey):
         self.assertEqual(self.host.count(r'/artifacts\?'), 2, 'the listing took two real gh calls')
         metric = job.saved('report-job.json')['metrics'][API_METRIC]
         self.assertEqual(metric['value'], self.host.count(''))
-        self.assertIn('archive=4 (QueryCost 4)', metric['detail'])
+        # The one archive read beyond the plugin's cost is the merged-run lookup finding no pull request.
+        self.assertIn('archive=5 (history QueryCost 4, the rest merged-run reads and retries)', metric['detail'])
         # Provenance held across the pages: the unrelated artifact on the first was never read.
         rolling = self.history_of(job.run_id)
         self.assertEqual([run['head_sha'] for run in rolling['runs']], [first.sha, job.sha])
@@ -1111,6 +1592,10 @@ class DirectTool(Journey):
                 (['--repo', 'owner/repo', '--mode', 'pull-request'], 'change-url'),
                 (['--repo', 'owner/repo', '--mode', 'base'], 'base-ref'),
                 (['--repo', 'owner/repo', '--budget-files', '{'], 'valid glob'),
+                (['--repo', 'owner/repo', '--omit-labels', 'Not A Label'], 'must match'),
+                (['--repo', 'owner/repo', '--saved-results-artifacts', 'results-*'], '--saved-results-dir'),
+                (['--repo', 'owner/repo', '--mode', 'base', '--base-ref', 'main', '--saved-results-artifacts', 'results-*',
+                  '--saved-results-dir', '.'], 'pull-request or read-only'),
             ]:
                 answer = harness.bounded_run([str(driver), 'report', '--out', out, *arguments], cwd=self.repository.path,
                                         capture_output=True, text=True, check=False, env=clean_environment())
@@ -1476,7 +1961,8 @@ class Contract(unittest.TestCase):
 
     def test_inputs_reconcile_with_the_driver_and_documents(self):
         inputs = self.action['inputs']
-        self.assertEqual(set(inputs), {'token', 'budget-files', 'labels', 'artifact-name', 'enforcement-exclude-labels'})
+        self.assertEqual(set(inputs), {'token', 'budget-files', 'labels', 'artifact-name', 'enforcement-exclude-labels',
+                                       'saved-results-artifacts', 'omit-labels'})
         self.assertTrue(inputs['token']['required'])
         for spec in inputs.values():
             self.assertIn('description', spec)
@@ -1514,16 +2000,6 @@ class Contract(unittest.TestCase):
         self.assertEqual(set(action['with']) - set(self.action['inputs']), set())
         self.assertIn('token', action['with'])
         self.assertEqual(len(workflow['jobs']), 3, 'the example adds exactly one job to its predecessors')
-
-
-def zipped(members):
-    import io
-    import zipfile
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, 'w') as archive:
-        for name, content in members.items():
-            archive.writestr(name, content)
-    return buffer.getvalue()
 
 
 def clean_environment():

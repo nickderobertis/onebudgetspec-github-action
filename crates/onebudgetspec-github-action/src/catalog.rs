@@ -45,6 +45,11 @@ pub fn split_list(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether any of a budget's `labels` is in `selected`.
+pub fn carries_any(labels: &[String], selected: &[String]) -> bool {
+    labels.iter().any(|label| selected.contains(label))
+}
+
 /// The production budgets files `patterns` match, relative to the checkout.
 pub fn discover(patterns: &[String]) -> Result<Vec<String>, Failure> {
     let mut set = GlobSetBuilder::new();

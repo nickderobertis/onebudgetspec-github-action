@@ -43,3 +43,8 @@ jobs:
       - uses: nickderobertis/onebudgetspec-github-action@v0.2.0
         with:
           token: ${{ github.token }}
+          # What the test jobs saved with `onebudgetspec check --save-results` and uploaded with
+          # `if: always()`: those budgets show that figure, and their commands do not run here.
+          saved-results-artifacts: budget-check-results-*
+          # Budgets a pull request cannot measure leave the table, and one line counts them.
+          omit-labels: not-measured-on-pr

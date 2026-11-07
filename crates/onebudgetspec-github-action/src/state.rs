@@ -90,6 +90,15 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
     })
 }
 
+/// Where and under which key `finish` delivers a pull request's comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination {
+    /// The change request.
+    pub change_url: String,
+    /// The standing comment's key.
+    pub key: String,
+}
+
 /// What `report` left `finish` to do about the base job's rolling file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RollingDecision {

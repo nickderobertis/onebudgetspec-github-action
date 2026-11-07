@@ -2,7 +2,7 @@
 
 The driver, plugin, onevcs and core all run for real, installed the way the action installs them:
 from a release archive and a wheel served by doubles of the release host and the package index.
-The real `gh` and the real `actions/upload-artifact` code run too. `gh` reaches the double through
+The real `gh` and the real `actions/upload-artifact` and `actions/download-artifact` code run too. `gh` reaches the double through
 its own development host, `github.localhost`, over `HTTP_PROXY`. One in-process HTTP double stands in for GitHub's
 API, its artifact service, blob and object storage, the release host and the package index, and
 records every request of a run: nothing is counted that the double did not receive.
@@ -23,6 +23,7 @@ import tarfile
 import time
 import tempfile
 import threading
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -34,6 +35,8 @@ WORKFLOW = 42
 TOOLS = ROOT / 'target' / 'action-tools'
 # The exact code `actions/upload-artifact@v4` currently resolves to.
 UPLOAD_ARTIFACT = ('v4.6.2', 'ea165f8d65b6e75b540449e92b4886f43607fa02')
+# The exact code `actions/download-artifact@v4` currently resolves to.
+DOWNLOAD_ARTIFACT = ('v4.3.0', 'd3f86a106a0bac45b974a628896c90dbdf5c8093')
 TWIRP = '/twirp/github.actions.results.api.v1.ArtifactService/'
 API_ORIGIN = 'http://api.github.localhost'
 _cached = {}
@@ -146,20 +149,30 @@ def real_wheel():
     return wheel
 
 
-def upload_artifact_entry():
-    """The real action's entry point, fetched once at its pinned commit."""
-    directory = TOOLS / f'upload-artifact-{UPLOAD_ARTIFACT[0]}'
-    entry = directory / 'dist/upload/index.js'
+def _action_entry(name, pinned, relative):
+    """A real action's entry point, fetched once at its pinned commit."""
+    directory = TOOLS / f'{name}-{pinned[0]}'
+    entry = directory / relative
     if not entry.is_file():
-        url = f'https://codeload.github.com/actions/upload-artifact/tar.gz/{UPLOAD_ARTIFACT[1]}'
+        url = f'https://codeload.github.com/actions/{name}/tar.gz/{pinned[1]}'
         data = urllib.request.urlopen(url, timeout=120).read()
         directory.mkdir(parents=True, exist_ok=True)
         with tarfile.open(fileobj=io.BytesIO(data)) as archive:
             for member in archive.getmembers():
                 member.name = member.name.split('/', 1)[-1]
-                if member.name.startswith('dist/upload/') or member.name == 'action.yml':
+                if member.name.startswith(str(Path(relative).parent) + '/') or member.name == 'action.yml':
                     archive.extract(member, directory, filter='data')
-    return entry
+    return directory, entry
+
+
+def artifact_action(uses):
+    """The directory and entry point of the artifact action a step names."""
+    name, reference = uses.split('@', 1)
+    if name == 'actions/upload-artifact' and harness_major_matches(UPLOAD_ARTIFACT, reference):
+        return _action_entry('upload-artifact', UPLOAD_ARTIFACT, 'dist/upload/index.js')
+    if name == 'actions/download-artifact' and harness_major_matches(DOWNLOAD_ARTIFACT, reference):
+        return _action_entry('download-artifact', DOWNLOAD_ARTIFACT, 'dist/index.js')
+    raise AssertionError(f'unexpected action {uses}')
 
 
 def runtime_token(run_id, attempt):
@@ -185,6 +198,7 @@ class Host:
         self.artifacts = {}
         self.archives = {}
         self.comments = []
+        self.comment_write_times = []
         # Who the token is and who its comments read as; `actions_bot` is the Actions token's shape.
         self.viewer_login = 'viewer'
         self.comment_author = {'__typename': 'User', 'login': 'viewer'}
@@ -195,6 +209,8 @@ class Host:
         self.upload_failures = 0
         self.uploads_before_failing = 0
         self.next_artifact = 1000
+        self.pulls = {}
+        self.refuse_list_artifacts = False
         archive = built_archive()
         self.assets = {archive.name: archive.read_bytes()}
         self.assets['SHA256SUMS'] = (
@@ -308,6 +324,8 @@ class Host:
         self.reply(handler, 200, json.dumps(answer).encode())
 
     def write_comment(self, handler, path, payload):
+        with self.lock:
+            self.comment_write_times.append(time.time())
         if self.write_status:
             return self.reply(handler, self.write_status, b'{"message":"Resource not accessible by integration"}')
         with self.lock:
@@ -326,11 +344,18 @@ class Host:
         run = re.fullmatch(r'/repos/owner/repo/actions/runs/(\d+)', clean)
         if run:
             return self.reply(handler, 200, json.dumps({'id': int(run[1]), 'workflow_id': WORKFLOW}).encode())
+        pulls = re.fullmatch(r'/repos/owner/repo/commits/([^/]+)/pulls', clean)
+        if pulls:
+            return self.reply(handler, 200, json.dumps(self.pulls.get(pulls[1], [])).encode())
         if '/actions/workflows/' in clean:
-            return self.reply(handler, 200, json.dumps({'workflow_runs': self.runs}).encode())
+            return self.reply(handler, 200, json.dumps({'workflow_runs': self.listed_runs(path)}).encode())
         listed = re.fullmatch(r'/repos/owner/repo/actions/runs/(\d+)/artifacts', clean)
         if listed:
-            artifacts = self.artifacts.get(listed[1], [])
+            # As GitHub lists them: newest first, narrowed by an exact `name`.
+            artifacts = sorted(self.artifacts.get(listed[1], []), key=lambda item: item['id'], reverse=True)
+            name = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get('name')
+            if name:
+                artifacts = [item for item in artifacts if item['name'] == name[0]]
             if self.paged_artifacts and 'page=2' not in path:
                 # The first page holds only an unrelated artifact; the one wanted is on the second.
                 unrelated = [{'id': 999, 'name': 'unrelated', 'size_in_bytes': 1, 'expired': False}]
@@ -347,6 +372,21 @@ class Host:
         if clean.startswith('/repos/owner/repo/'):
             return self.reply(handler, 200, b'{"ok":true}')
         return self.reply(handler, 404, b'{"message":"Not Found"}')
+
+    def listed_runs(self, path):
+        """A workflow's runs as GitHub filters them: `event`, `head_sha`, then newest first, a page."""
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+        runs = [run for run in self.runs
+                if all(run[key] == query[key][0] for key in ('event', 'head_sha') if key in query)]
+        if 'head_sha' not in query:
+            return runs
+        runs.sort(key=lambda run: run['created_at'], reverse=True)
+        return runs[:int(query.get('per_page', ['30'])[0])]
+
+    def merge_pull_request(self, merge_commit, head, number=1):
+        """What `commits/SHA/pulls` answers for the merge commit of a merged pull request."""
+        self.pulls[merge_commit] = [{'number': number, 'state': 'closed', 'merged_at': '2026-11-01T00:00:00Z',
+                                     'merge_commit_sha': merge_commit, 'head': {'sha': head}}]
 
     def actions_bot(self):
         """Answer as GitHub does for the Actions token: one account, spelled two ways."""
@@ -369,7 +409,8 @@ class Host:
             self.next_artifact += 1
             self.archives[str(self.next_artifact)] = data
             self.artifacts.setdefault(str(run_id), []).append({
-                'id': self.next_artifact, 'name': name, 'size_in_bytes': len(data), 'expired': False, 'attempt': attempt})
+                'id': self.next_artifact, 'name': name, 'size_in_bytes': len(data), 'expired': False, 'attempt': attempt,
+                'created_at': '2026-11-01T00:%02d:%02d.000Z' % (self.next_artifact // 60 % 60, self.next_artifact % 60)})
             return self.next_artifact
 
     def artifact_service(self, handler, method, request):
@@ -399,6 +440,25 @@ class Host:
                 pending = self.pending_uploads.pop(request['name'])
             identifier = self.attach(pending['run_id'], request['name'], b''.join(pending['blocks']), pending['attempt'])
             return self.reply(handler, 200, json.dumps({'ok': True, 'artifact_id': str(identifier)}).encode())
+        if method == 'ListArtifacts':
+            if self.refuse_list_artifacts:
+                return self.reply(handler, 403, b'{"code":"permission_denied","msg":"refused"}')
+            run_id = request['workflow_run_backend_id'].rsplit('-', 1)[0]
+            with self.lock:
+                listed = [{'workflow_run_backend_id': request['workflow_run_backend_id'],
+                           'workflow_job_run_backend_id': request['workflow_job_run_backend_id'],
+                           'database_id': str(item['id']), 'name': item['name'], 'size': str(item['size_in_bytes']),
+                           'created_at': item['created_at']}
+                          for item in self.artifacts.get(run_id, []) if not item['expired']
+                          and request.get('name_filter', item['name']) == item['name']
+                          and str(request.get('id_filter', item['id'])) == str(item['id'])]
+            return self.reply(handler, 200, json.dumps({'artifacts': listed}).encode())
+        if method == 'GetSignedArtifactURL':
+            run_id = request['workflow_run_backend_id'].rsplit('-', 1)[0]
+            with self.lock:
+                found = [item for item in self.artifacts.get(run_id, []) if item['name'] == request['name']]
+            newest = max(found, key=lambda item: item['id'])
+            return self.reply(handler, 200, json.dumps({'signed_url': f'{self.url}/objects/{newest["id"]}'}).encode())
         return self.reply(handler, 404, json.dumps({'code': 'not_found', 'msg': method}).encode())
 
     def blob(self, handler, path, body):
@@ -432,10 +492,10 @@ class Repository:
         self.path = Path(self.temporary.name)
         self.git('init', '--quiet', '--initial-branch', 'main')
 
-    def git(self, *args):
+    def git(self, *args, environment=None):
         result = subprocess.run(
             ['git', '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', *args],
-            cwd=self.path, capture_output=True, text=True, check=False)
+            cwd=self.path, capture_output=True, text=True, check=False, env={**os.environ, **(environment or {})})
         if result.returncode:
             raise RuntimeError(f'git {args}: {result.stderr}')
         return result.stdout.strip()
@@ -445,19 +505,20 @@ class Repository:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
 
-    def commit(self, message='change'):
+    def commit(self, message='change', committed_at=None):
         (self.path / 'commit-marker').write_text(message + os.urandom(8).hex())
         self.git('add', '-A')
-        self.git('commit', '--quiet', '-m', message)
+        self.git('commit', '--quiet', '-m', message,
+                 environment={'GIT_COMMITTER_DATE': committed_at} if committed_at else None)
         return self.git('rev-parse', 'HEAD')
 
     def close(self):
         self.temporary.cleanup()
 
 
-def harness_major_matches(reference):
+def harness_major_matches(pinned, reference):
     """action.yml's floating major must be the one the pinned code belongs to."""
-    return UPLOAD_ARTIFACT[0].startswith(reference + '.')
+    return pinned[0].startswith(reference + '.')
 
 
 def budgets_yaml(entries):
@@ -467,6 +528,31 @@ def budgets_yaml(entries):
          'unit': options.get('unit', 'count'), 'direction': options.get('direction', 'max'),
          'threshold': options.get('threshold', 100), **({'labels': options['labels']} if 'labels' in options else {})}
         for entry, command, options in entries]})
+
+
+def check_result(budget, actual, ended_at='2099-01-01T00:00:00Z', file='budgets.yaml', labels=(), unit='count',
+                 direction='max', threshold=100.0, detail=None):
+    """One result as `onebudgetspec check --save-results` writes it, its verdict core's own rule."""
+    headroom = threshold - actual if direction == 'max' else actual - threshold
+    return {'id': budget, 'file': file, 'labels': list(labels), 'unit': unit, 'direction': direction,
+            'threshold': float(threshold), 'verdict': 'within' if headroom >= 0 else 'over', 'actual': float(actual),
+            'headroom': float(headroom), 'headroom_percent': headroom / threshold * 100 if threshold else None,
+            'detail': detail, 'error': None, 'started_at': ended_at, 'ended_at': ended_at,
+            'host': {'load1': 0.5, 'cpus': 4, 'mem_available_mib': 1024, 'conditions': {}}}
+
+
+def check_report(*results):
+    """The document `check --save-results` saves."""
+    return json.dumps({'schema_version': 1, 'results': list(results)})
+
+
+def zipped(members):
+    """An artifact's archive of the named files."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+    return buffer.getvalue()
 
 
 def event_pull_request(number, head, base, head_repository=REPOSITORY, draft=False):
@@ -488,13 +574,14 @@ class Expression:
             if separator in text:
                 left, right = text.split(separator, 1)
                 return combine(self.value(left), self.value(right))
-        if '==' in text:
-            left, right = text.split('==', 1)
-            return self.value(left) == self.value(right)
+        for separator, compare in (('!=', lambda a, b: a != b), ('==', lambda a, b: a == b)):
+            if separator in text:
+                left, right = text.split(separator, 1)
+                return compare(self.value(left), self.value(right))
         if text == 'always()':
             return True
         if text.startswith("'"):
-            return text.strip("'")
+            return text[1:-1]
         value = self.context
         for part in text.split('.'):
             value = value.get(part, '') if isinstance(value, dict) else ''
@@ -548,7 +635,7 @@ class Job:
         document, inputs = self._defaults()
         inputs.update(self.inputs)
         steps_context = {}
-        context = {'inputs': inputs, 'github': self.github, 'steps': steps_context}
+        context = {'inputs': inputs, 'github': self.github, 'steps': steps_context, 'runner': {'temp': str(self.temp)}}
         expression = Expression(context)
         output_directory = self.temp / 'outputs'
         output_directory.mkdir()
@@ -562,7 +649,7 @@ class Job:
                 steps_context[identifier] = {'outcome': 'skipped', 'outputs': {}}
                 continue
             if 'uses' in step:
-                outcome, outputs = self._upload(step, expression, output_directory / identifier)
+                outcome, outputs = self._artifact_action(step, expression, output_directory / identifier)
             else:
                 outcome, outputs = self._shell(step, expression, output_directory / identifier, summary)
             steps_context[identifier] = {'outcome': outcome, 'outputs': outputs}
@@ -573,16 +660,13 @@ class Job:
         if self.exit_code is None:
             self.exit_code = 1 if failed else 0
         if self.register:
-            self.host.add_run(self.run_id, self.sha, self.attempt, minute=self.run_id)
+            self.host.add_run(self.run_id, self.sha, self.attempt, minute=self.run_id, event=self.event_name)
         return self
 
-    def _upload(self, step, expression, output_file):
+    def _artifact_action(self, step, expression, output_file):
         """Run the real action's code against the doubled services, as the runner would."""
-        version = step['uses'].split('@', 1)
-        if version[0] != 'actions/upload-artifact' or not harness_major_matches(version[1]):
-            raise AssertionError(f'unexpected action {step["uses"]}')
-        entry = upload_artifact_entry()
-        declared = yaml.safe_load((entry.parents[2] / 'action.yml').read_text())['inputs']
+        directory, entry = artifact_action(step['uses'])
+        declared = yaml.safe_load((directory / 'action.yml').read_text())['inputs']
         arguments = {name: str(spec.get('default', '')) for name, spec in declared.items()}
         arguments.update({key: expression.substitute(value) for key, value in step['with'].items()})
         output_file.touch()
