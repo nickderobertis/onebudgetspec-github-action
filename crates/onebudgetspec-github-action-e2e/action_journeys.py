@@ -774,7 +774,7 @@ class Measured(Journey):
         self.assertEqual({row['id'] for row in json.loads(reproduced.stdout)['rows']}, set(job.rows()))
         self.assertEqual(json.loads(reproduced.stdout)['rows'], job.saved('comparison-report.json')['rows'])
 
-        # One budget, two labels matched in turn: the line's grammar follows its count.
+        # The line follows what matched: its count's grammar and the labels that carried a budget.
         single = self.pull_request(base, base, inputs={'token': 'real-token', 'omit-labels': 'absent-label'})
         self.assertNotIn('left out because', self.host.comments[-1]['body'], 'nothing carries it, so no line')
         self.assertEqual(len(single.rows()), 5)
@@ -918,7 +918,7 @@ class Measured(Journey):
         self.assertEqual((results['also-runnable']['actual'], results['runs-here']['actual']), (7.0, 9.0))
         self.assertEqual(none.rows()['job-seconds']['verdict'], 'within')
 
-        # A base job with no read of its own reads the host when GitHub refuses too: still green.
+        # GitHub refusing the lookup is the same: a diagnostic and a green job.
         self.host.refuse.append({'path': '/pulls$', 'status': 500, 'times': 5})
         refused = self.base(merge)
         self.assertEqual(refused.exit_code, 0, refused.stdout)
@@ -986,7 +986,7 @@ class Measured(Journey):
         self.assertEqual(job.outcomes['main-upload'], 'success')
         self.assertNotIn('final-upload', job.outcomes)
         self.assertIsNotNone(self.host.artifact_files(job.run_id))
-        self.assertIn('| steady', '\n'.join(line.replace(' / ', '| ') for line in self.host.comments[0]['body'].splitlines()))
+        self.assertIn('| within |', self.row_text(job, 'steady'))
 
 
 class Forks(Journey):
