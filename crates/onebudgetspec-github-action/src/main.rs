@@ -5,8 +5,10 @@
 mod catalog;
 mod cli;
 mod finish;
+mod merged;
 mod proxy;
 mod report;
+mod saved;
 mod state;
 mod telemetry;
 mod tools;

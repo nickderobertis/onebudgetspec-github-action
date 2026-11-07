@@ -21,11 +21,18 @@ pub struct Cli {
 pub enum Command {
     /// Check every runnable budget once, compare with base history, then render and deliver.
     Report(Box<ReportArgs>),
-    /// Complete a `report --phased` run: stop the timer and save the own-command verdicts.
+    /// Complete a `report --phased` run: stop the timer, judge the own commands, post the one
+    /// comment and save the completed verdicts.
     Finish(FinishArgs),
     /// Reproduce a job's comparison from its saved `comparison-input.json`, offline.
     Reproduce(ReproduceArgs),
     /// Report one saved telemetry metric as a budget's measurement.
+    ///
+    /// `report-command-seconds` runs from cold install to the end of the main result upload, so
+    /// it ends before the comment post. `report-github-api-requests-per-run` counts every request
+    /// made through gh, retries and pages included: budget commands such as CI-time reads, the
+    /// workflow lookup, the history and merged-run reads and the delivery. A budget reading it
+    /// during the job sees the count before the post, whose requests the saved file then adds.
     Telemetry(TelemetryArgs),
 }
 
@@ -60,6 +67,21 @@ pub struct ReportArgs {
     /// Labels whose budgets are report-only: run and shown, never failing this command.
     #[arg(long, default_value = "")]
     pub enforcement_exclude_labels: String,
+    /// The artifact name pattern this run's saved results were downloaded by. Set, on a pull
+    /// request or read-only run, a budget with a saved result takes it instead of running, and
+    /// one left with nothing reads as having no saved result.
+    #[arg(long, default_value = "")]
+    pub saved_results_artifacts: String,
+    /// The directory holding those artifacts' `*.json` files, each a `CheckReport`.
+    #[arg(long)]
+    pub saved_results_dir: Option<PathBuf>,
+    /// How downloading those artifacts ended, as the workflow reports it.
+    #[arg(long, default_value = "success")]
+    pub saved_results_download: String,
+    /// Labels whose budgets are neither run nor shown, separated by commas or newlines. The
+    /// report counts them on one line and the saved catalog keeps them.
+    #[arg(long, default_value = "")]
+    pub omit_labels: String,
     /// Repository as OWNER/NAME.
     #[arg(long)]
     pub repo: String,
@@ -109,7 +131,8 @@ pub struct ReportArgs {
     /// Seconds the job spent installing, recorded in the telemetry.
     #[arg(long, default_value_t = 0.0)]
     pub install_seconds: f64,
-    /// Stop after the main results; the caller uploads them and then runs `finish`.
+    /// Stop after the main results; the caller uploads them and then runs `finish`, which
+    /// judges this job's own telemetry and delivers the one comment.
     #[arg(long)]
     pub phased: bool,
 }

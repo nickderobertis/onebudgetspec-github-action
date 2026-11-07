@@ -19,9 +19,10 @@ report() {
     printf '## Budget report\n\nNo budget ran: %s\n' "$(cat "$state/install-failed")" > "$out/report.md"
     return 0
   fi
-  local mode read_only_reason="" change_url="" base_ref="${BASE_REF:-}"
+  local mode read_only_reason="" change_url="" base_ref="${BASE_REF:-}" saved_pattern=""
   case "$EVENT_NAME" in
     pull_request)
+      saved_pattern="$SAVED_RESULTS_ARTIFACTS"
       if [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then
         mode=pull-request
         change_url="$SERVER_URL/$REPOSITORY/pull/$PR_NUMBER"
@@ -53,6 +54,10 @@ report() {
     --labels "$LABELS" \
     --artifact-name "$ARTIFACT_NAME" \
     --enforcement-exclude-labels "$ENFORCEMENT_EXCLUDE_LABELS" \
+    --saved-results-artifacts "$saved_pattern" \
+    --saved-results-dir "$RUNNER_TEMP/onebudgetspec-saved-results" \
+    --saved-results-download "$SAVED_RESULTS_DOWNLOAD" \
+    --omit-labels "$OMIT_LABELS" \
     --repo "$REPOSITORY" --head-sha "$HEAD_SHA" --base-ref "$base_ref" --base-sha "$BASE_SHA" \
     --run-id "$RUN_ID" --run-url "$SERVER_URL/$REPOSITORY/actions/runs/$RUN_ID" --attempt "$RUN_ATTEMPT" \
     --mode "$mode" --read-only-reason "$read_only_reason" --change-url "$change_url" \

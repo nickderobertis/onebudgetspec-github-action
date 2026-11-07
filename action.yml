@@ -1,7 +1,7 @@
 name: onebudgetspec budget report
 description: >-
-  Check every runnable budget once through ordinary onebudgetspec check, compare it with the
-  base branch's rolling history and keep one standing report on the pull request.
+  Settle every budget once, from a saved result or ordinary onebudgetspec check, compare it with
+  the base branch's rolling history and keep one standing report on the pull request.
 branding:
   icon: bar-chart-2
   color: blue
@@ -31,13 +31,35 @@ inputs:
       unavailable, with the failure's message as its reason. Empty enforces every budget.
     required: false
     default: ""
+  saved-results-artifacts:
+    description: >-
+      An artifact name pattern in this run, such as budget-check-results-*. On a pull request every
+      match is downloaded and each holds any number of *.json files, each a CheckReport: a budget
+      with a saved result shows it, verdict unchanged, and its command does not run. One whose command
+      cannot run here reads as having no saved result. Empty leaves every row to this job.
+    required: false
+    default: ""
+  omit-labels:
+    description: >-
+      Labels whose budgets are neither run nor shown, separated by commas or newlines. The report
+      carries one line counting them and saying why, and budget-run.json's catalog keeps them.
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
     - name: Install the report tools
       shell: bash
       run: bash "$GITHUB_ACTION_PATH/action/install.sh" "$GITHUB_ACTION_PATH" "$RUNNER_TEMP/onebudgetspec-action"
-    - name: Check, compare and report
+    - name: Download the saved results
+      id: saved-results
+      if: always() && inputs.saved-results-artifacts != '' && github.event_name == 'pull_request'
+      continue-on-error: true
+      uses: actions/download-artifact@v4
+      with:
+        pattern: ${{ inputs.saved-results-artifacts }}
+        path: ${{ runner.temp }}/onebudgetspec-saved-results
+    - name: Check and compare
       id: report
       if: always()
       shell: bash
@@ -47,6 +69,9 @@ runs:
         LABELS: ${{ inputs.labels }}
         ARTIFACT_NAME: ${{ inputs.artifact-name }}
         ENFORCEMENT_EXCLUDE_LABELS: ${{ inputs.enforcement-exclude-labels }}
+        SAVED_RESULTS_ARTIFACTS: ${{ inputs.saved-results-artifacts }}
+        SAVED_RESULTS_DOWNLOAD: ${{ steps.saved-results.outcome }}
+        OMIT_LABELS: ${{ inputs.omit-labels }}
         EVENT_NAME: ${{ github.event_name }}
         REPOSITORY: ${{ github.repository }}
         SERVER_URL: ${{ github.server_url }}
@@ -68,7 +93,7 @@ runs:
         name: ${{ steps.report.outputs.main-artifact }}
         path: ${{ steps.report.outputs.out }}
         if-no-files-found: warn
-    - name: Stop the timer and judge this job's own telemetry
+    - name: Stop the timer, judge this job's own telemetry and post the report
       id: finish
       if: always()
       shell: bash
