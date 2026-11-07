@@ -112,7 +112,8 @@ repository's retention setting, and an expired baseline reads as unavailable wit
 ### Base history
 
 Each base push reads one previous rolling file through `onebudgetspec-plugin-onevcs history`, appends its own completed
-result, deduplicates by commit, trims to 20 and uploads one new immutable file. A failed upload leaves the earlier one
+result, holding the merged pull request's figures where it took them, deduplicates by commit, trims to 20 and uploads
+one new immutable file. A failed upload leaves the earlier one
 as the next run's source; the lost commit is disclosed. Concurrent pushes upload separately and files are never merged,
 so an unrelated commit cannot enter. A push that measured nothing, or whose ordinary check could not run, saves no rolling
 file and says so, and the next push reads the one before it. Below five samples a row has no baseline, and from 5 to 19 it is
@@ -122,7 +123,8 @@ provisional.
 
 `report-github-api-requests-per-run` counts GitHub API requests, REST and GraphQL with retries and pages. Every `gh` command
 of a job, any verb and budget commands included, passes through a proxy that reads `gh`'s own one-line record of each HTTP
-exchange, and the plugin's own `QueryCost` is shown beside it. That is all a live job can see, so its saved figure covers
+exchange, and the plugin's own `QueryCost` is shown beside it. The merged-run reads go through it too, and count in the
+breakdown's `archive` term. That is all a live job can see, so its saved figure covers
 requests made through `gh`, and its telemetry says other clients are not seen. If `gh api` gives no such record, whether it
 succeeded or failed, the figure is unavailable with that reason, never estimated. A successful verb other than `api` that
 gives none, such as `gh repo view`, cannot be told apart from a local command such as `gh auth token`, so it counts as zero,
