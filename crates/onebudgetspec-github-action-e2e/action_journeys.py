@@ -1930,7 +1930,7 @@ class Degraded(Journey):
         refused_row = job.rows()['host-refuses']
         self.assertNotIn('verdict', refused_row)
         self.assertIn('report-only measurement failed', refused_row['unavailable'], 'a plain 404 is the measurement failing')
-        self.assertEqual(self.host.count('commits/[ab]'), 2)
+        self.assertEqual(self.host.count('commits/[ab]$'), 2, 'a merged-run lookup names a sha, which can start with either')
 
         # No gh on the runner, and a gh that cannot start: both are that budget's own result.
         self.repository.write('budgets.yaml', budgets_yaml([('reads', ['bash', '-c', 'gh api repos/owner/repo/commits/d'], {})]))
