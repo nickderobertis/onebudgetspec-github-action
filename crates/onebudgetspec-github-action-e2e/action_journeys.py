@@ -611,6 +611,23 @@ class Measured(Journey):
         self.assertEqual(failing.rows()['enforced']['verdict'], 'over')
         self.assertEqual(len(self.host.comments), 1)
 
+    def test_the_latest_result_for_an_id_wins_wherever_its_file_says_it_ran(self):
+        self.repository.write('values-steady', '5\n')
+        self.repository.write('budgets.yaml', budgets_yaml([('steady', from_data(), {'threshold': 40})]))
+        base = self.repository.commit('catalog')
+        job = self.saved_run(base, base, {
+            'budget-check-results-a': {'matching-file.json': check_report(
+                check_result('steady', 31, threshold=40, ended_at='2099-01-01T00:00:00Z'))},
+            'budget-check-results-b': {'elsewhere.json': check_report(
+                check_result('steady', 45, threshold=40, ended_at='2099-01-02T00:00:00Z', file='apps/elsewhere/budgets.yaml'))},
+        })
+        self.assertEqual(self.executed(), [], 'its command does not run')
+        row = job.rows()['steady']
+        self.assertEqual((row['current'], row['verdict']), (45.0, 'over'), 'the newer number and verdict')
+        self.assertEqual(job.exit_code, 1, job.stdout)
+        [saved] = job.saved('budget-run.json')['results']['results']
+        self.assertEqual((saved['file'], saved['ended_at']), ('budgets.yaml', '2099-01-02T00:00:00Z'))
+
     def test_what_a_saved_file_says_that_cannot_stand_is_a_diagnostic(self):
         self.repository.write('values-steady', '5\n')
         self.repository.write('budgets.yaml', budgets_yaml([

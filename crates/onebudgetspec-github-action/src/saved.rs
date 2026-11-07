@@ -55,17 +55,16 @@ fn json_files(directory: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// The latest of `results` for `budget`, matched by id, preferring one naming its file: another
-/// file of the same id is another budget.
+/// The latest of `results` for `budget`, matched by id alone: the latest `ended_at` wins whichever
+/// file a result names, and `adopted` then gives it the catalog's.
 pub fn latest_for<'a>(
     results: &'a [CheckResult],
     budget: &ListedBudget,
 ) -> Option<&'a CheckResult> {
-    let same_id = || results.iter().filter(|result| result.id == budget.id);
-    same_id()
-        .filter(|result| result.file == budget.file)
+    results
+        .iter()
+        .filter(|result| result.id == budget.id)
         .max_by_key(|result| result.ended_at)
-        .or_else(|| same_id().max_by_key(|result| result.ended_at))
 }
 
 /// `result` as `budget`'s own, or the reason core would refuse a run holding it, which would cost
