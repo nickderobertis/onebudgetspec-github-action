@@ -925,6 +925,41 @@ class Measured(Journey):
         self.assertIn('merged pull request\'s figures not read', refused.markdown())
         self.assertEqual(self.executed(), ['also-runnable', 'runs-here'])
 
+    def test_a_merged_artifact_that_cannot_stand_leaves_the_rows_as_they_were(self):
+        run_id, _, merge = self.merged_pull_request({})
+        run = json.loads(self.host.artifact_files(run_id)['budget-run.json'])
+        for archive, reason in [
+            (b'not an archive', 'not a readable archive'),
+            (zipped({'report.md': 'no results here'}), 'no budget-run.json'),
+            (zipped({'budget-run.json': 'not json'}), 'budget-run.json is not JSON'),
+            (zipped({'budget-run.json': json.dumps({'results': []})}), 'no readable results'),
+        ]:
+            self.host.attach(run_id, 'budget-results', archive)
+            job = self.base(merge)
+            self.assertEqual(job.exit_code, 0, job.stdout)
+            self.assertIn(reason, job.markdown())
+            self.assertEqual(self.executed(), ['also-runnable', 'runs-here'], reason)
+
+        # A figure contradicting this commit's catalog, or one that errored, leaves only its own row.
+        results = {result['id']: result for result in run['results']['results']}
+        results['also-runnable']['threshold'] = 7.0
+        results['runs-here'] = {**results['runs-here'], 'verdict': 'error', 'actual': None, 'headroom': None,
+                                'headroom_percent': None, 'error': 'it failed there'}
+        run['results']['results'] = list(results.values())
+        self.host.attach(run_id, 'budget-results', zipped({'budget-run.json': json.dumps(run)}))
+        job = self.base(merge)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(self.executed(), ['also-runnable', 'runs-here'])
+        self.assertIn(f"also-runnable's figure from merged pull request #1's run {run_id} ignored", job.markdown())
+
+        # A pull request whose head has no run of this workflow stops at that read.
+        self.host.runs = [item for item in self.host.runs if item['event'] != 'pull_request']
+        self.host.clear_requests()
+        job = self.base(merge)
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertIn('has no pull_request run of this workflow', job.markdown())
+        self.assertEqual(self.host.count(rf'/runs/{run_id}/artifacts'), 0)
+
     def test_the_one_comment_holds_the_jobs_own_figure(self):
         self.measured_catalog()
         base = self.repository.commit('catalog')
