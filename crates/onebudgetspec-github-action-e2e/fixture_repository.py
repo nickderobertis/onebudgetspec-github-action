@@ -95,11 +95,27 @@ class Recorder:
             'markdown': files.get('report.md', b'').decode(),
             # The saved report's own bytes, which a render is compared against; never captured.
             'saved_report': files.get('comparison-report.json', b'').decode(),
+            # The released core's own JSON report for the saved input, from the CLI this job
+            # installed; what the saved report is checked against, and never captured either.
+            'core_report': core_report(job),
             'telemetry': {str(path.relative_to(root)): json.loads(path.read_text())
                           for path in sorted(root.glob('**/.telemetry/*.json'))},
             'comment': self.host.comments[-1]['body'] if self.host.comments else None,
         })
         return job
+
+
+def core_report(job):
+    """`onebudgetspec report --json` over the job's saved input, by the core the action installed."""
+    saved = job.out / 'comparison-input.json'
+    if not saved.is_file():
+        return None
+    answer = subprocess.run([str(job.temp / 'onebudgetspec-action/tools/onebudgetspec'), 'report', '--json',
+                             '--input', str(saved)], capture_output=True, text=True, check=False)
+    # 1 is a report with a row over its limit, as `check` exits; anything else gave no report.
+    if answer.returncode not in (0, 1):
+        raise RuntimeError(f'onebudgetspec report exited {answer.returncode}: {answer.stderr}')
+    return json.loads(answer.stdout)
 
 
 def run(harness):
@@ -138,6 +154,7 @@ def capture(checkout, destination):
             job.pop(bulky)
     for job in journey['jobs']:
         job.pop('saved_report')
+        job.pop('core_report')
     (destination / 'journey.json').write_text(json.dumps(journey, indent=1, sort_keys=True) + '\n')
     shutil.copy2(Path(checkout) / 'action.yml', destination / 'action.yml')
     version = harness.dependencies()['CORE_CLI_VERSION']

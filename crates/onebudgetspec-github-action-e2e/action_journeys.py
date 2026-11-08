@@ -80,6 +80,15 @@ def figure(value):
     return f'{value:,.0f}' if abs(value) >= 100 else f'{value:.1f}' if abs(value) >= 10 else f'{value:.2f}'
 
 
+def with_the_actions_additions(core, saved_diagnostics):
+    """The core CLI's own report with only what the action adds to its data: its own diagnostics,
+    after the core's (all of the saved ones past the core's count), and a row's no-saved-result
+    reason cut to the words that claim no cause."""
+    rows = [{**row, 'unavailable': NO_SAVED} if (row.get('unavailable') or '').startswith(NO_SAVED) else row
+            for row in core['rows']]
+    return {**core, 'rows': rows, 'diagnostics': core['diagnostics'] + saved_diagnostics[len(core['diagnostics']):]}
+
+
 def history_block(body):
     """The hidden history a standing comment carries."""
     start = '<!-- onebudgetspec-history\n'
@@ -2182,6 +2191,11 @@ class Compatibility(unittest.TestCase):
                 self.assertEqual(sorted(job['telemetry']), sorted(then['telemetry']))
                 for path, telemetry in job['telemetry'].items():
                     self.assertEqual(fixture_repository.key_paths(telemetry), fixture_repository.key_paths(then['telemetry'][path]))
+                # The saved report is the released core CLI's JSON report for the saved input, with
+                # only the action's additions; the Rust half then holds report.md to its render.
+                self.assertIsNotNone(job['core_report'], 'every job saves its comparison input')
+                self.assertEqual(json.loads(job['saved_report']), with_the_actions_additions(
+                    job['core_report'], json.loads(job['saved_report'])['diagnostics']))
                 if 'documents' not in then:
                     continue
                 documents, released = job['documents'], then['documents']
