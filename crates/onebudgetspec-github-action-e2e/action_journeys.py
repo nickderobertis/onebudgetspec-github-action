@@ -31,6 +31,58 @@ READS_REST = 'gh api repos/owner/repo/commits/main > /dev/null || exit 1;'
 API_METRIC = 'report-github-api-requests-per-run'
 OWN = ['onebudgetspec-github-action', 'telemetry', '--metric', 'report-command-seconds', '--input', '.telemetry/report-job.json']
 
+# Where each part of the core's comment layout opens; each closes at its next `</details>`.
+SECTIONS = {'attention': '<details open><summary><b>Needs attention', 'within': '<details><summary><b>Within budget',
+            'details': '<details><summary>Details</summary>', 'earlier': '<details><summary>Flags on earlier heads'}
+
+
+def section(body, name):
+    """One collapsible part of a posted comment, or None when the comment has none."""
+    start = body.find(SECTIONS[name])
+    return None if start < 0 else body[start:body.index('</details>', start)]
+
+
+def table_rows(text):
+    """A section's table rows: each budget's name, then its cells."""
+    rows = {}
+    for line in (text or '').splitlines():
+        if line.startswith('| **'):
+            cells = [cell.strip() for cell in line.strip().strip('|').split('|')]
+            rows[cells[0].strip('*')] = cells[1:]
+    return rows
+
+
+def listed(text, heading):
+    """The `- names: text` bullets under one bold heading of the Details section, by name."""
+    if not text or f'**{heading}' not in text:
+        return {}
+    block = text.split(f'**{heading}', 1)[1].split('\n\n', 2)[1]
+    items = {}
+    for line in block.splitlines():
+        if line.startswith('- '):
+            names, said = line[2:].split(': ', 1)
+            items.update({name: said for name in names.split(', ')})
+    return items
+
+
+def placements(body, budget):
+    """Every place the report part of a comment shows `budget` as a row, as (section, text)."""
+    found = [(name, cells) for name in ('attention', 'within') for row, cells in table_rows(section(body, name)).items()
+             if row == budget]
+    unmeasured = listed(section(body, 'details'), 'Not measured on this run')
+    return found + ([('not-measured', unmeasured[budget])] if budget in unmeasured else [])
+
+
+def figure(value):
+    """A figure as the core's layout writes it: grouped whole from 100, one decimal from 10, else two."""
+    return f'{value:,.0f}' if abs(value) >= 100 else f'{value:.1f}' if abs(value) >= 10 else f'{value:.2f}'
+
+
+def history_block(body):
+    """The hidden history a standing comment carries."""
+    start = '<!-- onebudgetspec-history\n'
+    return json.loads(body[body.index(start) + len(start):body.rindex('\n-->')])
+
 
 class Journey(unittest.TestCase):
     def setUp(self):
@@ -146,22 +198,24 @@ class Lifecycle(Journey):
         verdicts = [row.get('verdict') for row in job.saved('comparison-report.json')['rows']]
         self.assertEqual(verdicts[:2], ['over', 'over'], 'failed rows lead')
 
-        # The one comment shows the table; a report-only row says so with its flag kept.
+        # The one comment leads with what needs attention; a report-only row says so with its flag kept.
         self.assertEqual(len(self.host.comments), 1)
         body = self.host.comments[0]['body']
-        self.assertIn('budgets.yaml / enforced-limit', body)
-        shadow_row = next(line for line in body.splitlines() if 'shadow-limit' in line and line.startswith('|'))
-        self.assertIn('report-only', shadow_row)
-        self.assertIn('over', shadow_row)
-        self.assertIn('constant-baseline-change', shadow_row)
-        # The own row holds its figure and verdict on the comment, the same as the saved artifact.
-        own_row = next(line for line in body.splitlines() if 'job-seconds' in line and line.startswith('|'))
-        self.assertIn('| within |', own_row)
-        self.assertNotIn('unavailable', own_row)
+        attention = table_rows(section(body, 'attention'))
+        self.assertEqual(attention['enforced-limit'][1], 'Over limit · flagged')
+        self.assertEqual(attention['shadow-limit'][1], 'Over limit · flagged (report-only)')
+        self.assertEqual(attention['requests-read'][1], 'Flagged (was constant)')
+        # The own row holds its figure on the comment, the same as the saved artifact; its seconds can
+        # move a standard deviation against the base runs', which flags it and never fails it.
+        [(place, cells)] = placements(body, 'job-seconds')
+        self.assertIn(place, ('within', 'attention'), body)
+        self.assertTrue(place == 'within' or cells[1].startswith('Flagged'), cells)
+        self.assertNotIn('job-seconds', listed(section(body, 'details'), 'Why some figures are missing'))
         saved = json.loads(self.host.artifact_files(job.run_id)['budget-run.json'])
         own = next(result for result in saved['results']['results'] if result['id'] == 'job-seconds')
         self.assertEqual(own['verdict'], 'within')
         self.assertLess(own['actual'], 120)
+        self.assertTrue(cells[0].startswith(f'{figure(own["actual"])} seconds<br>'), cells)
         self.assertFalse([row for row in saved['unavailable'] if row['id'] == 'job-seconds'])
         self.assertEqual(saved['enforcement_exclude_labels'], ['provisional'])
         # A pull request never writes the base history.
@@ -179,18 +233,18 @@ class Lifecycle(Journey):
         self.assertEqual(update.exit_code, 0, update.stdout)
         self.assertEqual(len(self.host.comments), 1)
         body = self.host.comments[0]['body']
-        self.assertIn(head, body)
-        self.assertIn(second, body)
-        self.assertTrue([line for line in body.splitlines() if line.startswith('- ') and 'requests-read' in line],
-                        f'the first head keeps its flag after the second fixed it: {body}')
+        self.assertIn(f'head: {second}', section(body, 'details'))
+        earlier = section(body, 'earlier')
+        self.assertIn(head, earlier)
+        self.assertIn('- budgets.yaml/requests-read: constant-baseline-change', earlier,
+                      f'the first head keeps its flag, folded, after the second fixed it: {body}')
 
         # An identical rerun neither duplicates the comment nor its head's entry.
-        entries = self.host.comments[0]['body'].split('### Per-head adverse flags')[1].count(second)
         rerun = self.pull_request(second, base_sha, run_id=update.run_id, attempt=2)
         self.assertEqual(rerun.exit_code, 0)
         self.assertEqual(len(self.host.comments), 1)
-        retained = self.host.comments[0]['body'].split('### Per-head adverse flags')[1]
-        self.assertEqual(retained.count(second), entries, 'one entry per head, however many attempts')
+        heads = [entry['head_sha'] for entry in history_block(self.host.comments[0]['body'])['entries']]
+        self.assertEqual(heads, [head, second], 'one entry per head, however many attempts')
 
         # The saved input reproduces this report offline through the direct tool.
         with tempfile.TemporaryDirectory() as directory:
@@ -226,8 +280,7 @@ class Lifecycle(Journey):
         [comment] = self.host.comments
         self.assertIn(f'head: {second}', comment['body'])
         self.assertNotIn(f'head: {first}', comment['body'])
-        row = next(line for line in comment['body'].splitlines() if line.startswith('|') and 'figure' in line)
-        self.assertIn('33.000', row)
+        self.assertEqual(placements(comment['body'], 'figure'), [('within', ['33.0 count<br>baseline 0/5'])])
         self.assertEqual(self.host.count(r'/issues/1/comments$'), 1, 'only the first run creates')
 
     def test_enforced_error_keeps_its_exit_and_its_completed_results(self):
@@ -296,10 +349,10 @@ class Lifecycle(Journey):
         self.assertNotIn('verdict', rows['release-figure'])
         self.assertIn('onevcs is not on PATH', rows['release-figure']['unavailable'])
         body = self.host.comments[0]['body']
-        comment_row = next(line for line in body.splitlines() if 'release-figure' in line and line.startswith('|'))
-        self.assertIn('onevcs is not on PATH', comment_row)
-        self.assertIn('unavailable', comment_row)
-        self.assertNotIn('| error', comment_row)
+        # Not measured, never an error: it needs no attention, and its reason is under Details.
+        self.assertEqual(placements(body, 'release-figure'),
+                         [('not-measured', 'no result this run (report-only) · baseline 0/5')])
+        self.assertIn('onevcs is not on PATH', listed(section(body, 'details'), 'Why some figures are missing')['release-figure'])
 
     def test_a_base_run_whose_report_only_commands_all_failed_saves_no_measurement(self):
         self.release_tail_catalog()
@@ -358,10 +411,8 @@ class Lifecycle(Journey):
         self.assertEqual(rows['shadow']['current'], 70.0)
         self.assertTrue(rows['shadow']['flag'], rows['shadow'])
         self.assertEqual(job.saved('budget-run.json')['unavailable'], [])
-        comment_row = next(line for line in self.host.comments[0]['body'].splitlines()
-                           if 'shadow' in line and line.startswith('|'))
-        self.assertIn('report-only', comment_row)
-        self.assertIn('over', comment_row)
+        self.assertEqual(table_rows(section(self.host.comments[0]['body'], 'attention'))['shadow'][1],
+                         'Over limit · flagged (report-only)')
 
     def test_invalid_budgets_and_inputs_are_ordinary_refusals(self):
         self.repository.write('budgets.yaml', 'schema_version: 1\nbudgets: [{unknown: key}]\n')
@@ -392,12 +443,13 @@ class Diagnostics(Journey):
         self.assertEqual(job.exit_code, 0, job.stdout)
         rows = job.rows()
         self.assertEqual(rows['requests-read']['baseline_n'], 0)
-        self.assertIn('baseline unavailable', rows['requests-read']['unavailable'])
+        self.assertNotIn('unavailable', rows['requests-read'], 'a short baseline is a count, not a missing figure')
+        self.assertIn('<br>baseline 0/5', placements(self.host.comments[0]['body'], 'requests-read')[0][1][0])
         self.assertEqual(len(rows), 9)
         self.assertEqual(len(self.host.comments), 1)
         self.assertIn('Budget report', job.summary)
 
-    def test_partial_baseline_is_unavailable_below_five_and_provisional_after(self):
+    def test_partial_baseline_is_counted_below_five_and_compared_from_five(self):
         self.repository.write('budgets.yaml', budgets_yaml([('steady', reported(5), {})]))
         self.repository.commit('catalog')
         for _ in range(4):
@@ -405,13 +457,13 @@ class Diagnostics(Journey):
         self.repository.git('checkout', '--quiet', '-b', 'few')
         job = self.pull_request(self.repository.commit('change'), base.sha)
         self.assertEqual(job.rows()['steady']['baseline_n'], 4)
-        self.assertIn('minimum 5', job.rows()['steady']['unavailable'])
+        self.assertEqual(placements(job.markdown(), 'steady'), [('within', ['5.00 count<br>baseline 4/5'])])
         self.repository.git('checkout', '--quiet', 'main')
         base = self.base()
         self.repository.git('checkout', '--quiet', '-b', 'enough')
         job = self.pull_request(self.repository.commit('change'), base.sha)
         self.assertEqual(job.rows()['steady']['baseline_n'], 5)
-        self.assertIn('provisional', job.markdown())
+        self.assertEqual(placements(job.markdown(), 'steady'), [('within', ['5.00 count<br>+0.0% (+0.0 SD)'])])
 
     def test_transport_failures_are_diagnostics_that_preserve_a_real_failure(self):
         self.catalog(enforced=10)
@@ -562,11 +614,15 @@ class Measured(Journey):
             self.host.attach(self.next_run, name, zipped(files))
         return self.pull_request(head, base, run_id=self.next_run, inputs=inputs or SAVED_INPUTS, **options)
 
-    def row_text(self, job, budget):
+    def row_text(self, budget):
+        """Where the latest comment shows `budget`, which must be exactly one place."""
         body = self.host.comments[-1]['body']
-        rows = [line for line in body.splitlines() if line.startswith('|') and f' {budget} ' in line]
-        self.assertEqual(len(rows), 1, body)
-        return rows[0]
+        found = placements(body, budget)
+        self.assertEqual(len(found), 1, body)
+        return found[0]
+
+    def details(self, heading):
+        return listed(section(self.host.comments[-1]['body'], 'details'), heading)
 
     def assert_no_saved_result(self, job, budget, baseline_n=6):
         row = job.rows()[budget]
@@ -577,7 +633,8 @@ class Measured(Journey):
         if baseline_n >= 5:
             self.assertEqual(row['mean'], 12.5)
             self.assertGreater(row['sd'], 0)
-            self.assertIn(f'provisional; {NO_SAVED} |', self.row_text(job, budget))
+            self.assertEqual(self.row_text(budget), ('not-measured', f'no result this run · baseline {baseline_n}/5'))
+            self.assertEqual(self.details('Why some figures are missing')[budget], NO_SAVED)
 
     def test_a_saved_result_replaces_the_command_and_keeps_its_verdict(self):
         self.repository.write('values-enforced', '5\n')
@@ -601,7 +658,7 @@ class Measured(Journey):
         rows = passing.rows()
         self.assertEqual((rows['enforced']['current'], rows['enforced']['verdict']), (31.0, 'within'))
         self.assertEqual((rows['shadow']['current'], rows['shadow']['verdict']), (70.0, 'over'))
-        self.assertIn('report-only', self.row_text(passing, 'shadow'))
+        self.assertEqual(self.row_text('shadow'), ('attention', ['70.0 count<br>baseline 0/5', 'Over limit (report-only)']))
 
         # An enforced overrun fails the job through the ordinary exit.
         failing = self.saved_run(base, base, {'budget-check-results-a': {'one.json': check_report(
@@ -681,10 +738,8 @@ class Measured(Journey):
         self.assertEqual(job.exit_code, 0, job.stdout)
         rows = job.rows()
         self.assertEqual({budget: rows[budget]['current'] for budget in rows}, {'replayed': 3.0, 'between': 4.0, 'fresh': 5.0})
-        self.assertIn('replayed from cache, measured 2026-03-09 |', self.row_text(job, 'replayed'))
-        # Newer than the head though older than the merge commit, and restored just now: both fresh.
-        self.assertNotIn('replayed', self.row_text(job, 'between'))
-        self.assertNotIn('replayed', self.row_text(job, 'fresh'))
+        self.assertEqual(self.details('Notes on this run'), {'replayed': 'replayed from cache, measured 2026-03-09'},
+                         'newer than the head though older than the merge commit, and restored just now: both fresh')
         self.assertEqual([note['id'] for note in job.saved('budget-run.json')['result_notes']], ['replayed'])
 
         # A checkout without the head commit cannot judge a replay: every number stands, and it says so.
@@ -774,8 +829,9 @@ class Measured(Journey):
         self.assertEqual(set(job.rows()), {'other-producer', 'runs-here', 'job-seconds'})
         line = '2 budgets are left out because a pull request cannot measure them (label not-measured-on-pr).'
         body = self.host.comments[-1]['body']
+        # The same line v0.2.0 gave, once, among the diagnostics inside the collapsed Details.
         self.assertEqual(len([text for text in body.splitlines() if 'left out because' in text]), 1, body)
-        self.assertIn(line, body)
+        self.assertIn(f'\n- {line}\n', section(body, 'details'))
         self.assertFalse([text for text in body.splitlines() if 'test-only' in text], 'its saved result is ignored, with no line')
         saved = job.saved('budget-run.json')
         self.assertEqual({budget['id'] for budget in saved['catalog']},
@@ -984,11 +1040,11 @@ class Measured(Journey):
         self.assertEqual(job.exit_code, 0, job.stdout)
         self.assertEqual(self.host.count(r'/issues/1/comments$'), 1)
         self.assertEqual(len(self.host.comment_write_times), 1, 'one write, once the figure is known')
-        row = self.row_text(job, 'job-seconds')
+        place, cells = self.row_text('job-seconds')
         telemetry = job.saved('report-job.json')
         seconds = telemetry['metrics']['report-command-seconds']
-        self.assertIn('| within |', row)
-        self.assertIn(f'{seconds["value"]:.3f}', row)
+        self.assertEqual(place, 'within')
+        self.assertEqual(cells, [f'{figure(seconds["value"])} seconds<br>baseline 0/5'])
         self.assertNotIn('measured once', self.host.comments[0]['body'])
         # The interval the saved file records ended before the post left.
         started = float((job.temp / 'onebudgetspec-action/started-at').read_text())
@@ -1021,10 +1077,11 @@ class Measured(Journey):
         self.assertEqual(self.host.count(r'/issues/1/comments$'), 1)
         self.assertEqual(len(self.host.comment_write_times), 1)
         self.assertEqual(job.exit_code, 3, job.stdout)
-        shadow, enforced = self.row_text(job, 'own-shadow'), self.row_text(job, 'own-enforced')
-        self.assertIn('| unavailable |', shadow)
-        self.assertIn('no-such-metric', shadow)
-        self.assertIn('| error |', enforced)
+        self.assertEqual(self.row_text('own-shadow'), ('not-measured', 'no result this run (report-only) · baseline 0/5'))
+        self.assertEqual(self.row_text('own-enforced'), ('attention', ['—<br>baseline 0/5', 'Error']))
+        reasons = self.details('Why some figures are missing')
+        self.assertIn('no-such-metric', reasons['own-shadow'])
+        self.assertIn('no-such-metric', reasons['own-enforced'])
         self.assertIn('no-such-metric', job.rows()['own-enforced']['unavailable'])
         self.assertNotIn('not judged', self.host.comments[0]['body'])
 
@@ -1038,7 +1095,7 @@ class Measured(Journey):
         self.assertEqual(job.outcomes['main-upload'], 'success')
         self.assertNotIn('final-upload', job.outcomes)
         self.assertIsNotNone(self.host.artifact_files(job.run_id))
-        self.assertIn('| within |', self.row_text(job, 'steady'))
+        self.assertEqual(self.row_text('steady'), ('within', ['5.00 count<br>baseline 0/5']))
 
 
 class Forks(Journey):
@@ -1192,11 +1249,10 @@ class History(Journey):
         job = self.pull_request(self.repository.commit('a change'), second.sha)
         self.assertEqual(job.exit_code, 0, job.stdout)
         self.assertEqual(job.rows()['job-seconds']['baseline_n'], 2, job.markdown())
-        self.assertIn('2 eligible samples', job.rows()['job-seconds']['unavailable'])
         self.assertEqual(job.rows()['needs-a-tool']['baseline_n'], 0)
-        comment_row = next(line for line in self.host.comments[0]['body'].splitlines()
-                           if line.startswith('|') and 'job-seconds' in line)
-        self.assertIn('2 eligible samples', comment_row)
+        [(place, cells)] = placements(self.host.comments[0]['body'], 'job-seconds')
+        self.assertEqual(place, 'within')
+        self.assertTrue(cells[0].endswith(' seconds<br>baseline 2/5'), cells)
 
     def test_a_base_run_whose_only_budget_cannot_measure_saves_no_rolling_file(self):
         # With no own command at all, nothing is left for `finish` to decide.

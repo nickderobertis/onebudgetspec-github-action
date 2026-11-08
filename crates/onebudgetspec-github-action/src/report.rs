@@ -981,17 +981,15 @@ fn read_host_history(
     })?;
     let cost = answer["cost"]["rest_requests"].clone();
     for (list, what) in [
-        ("skipped", "history run refused"),
-        ("lost", "history entry lost"),
+        ("lost", "history entries lost"),
+        ("skipped", "history runs refused"),
     ] {
-        for item in answer[list].as_array().map_or(&[][..], Vec::as_slice) {
-            diagnostics.push(format!(
-                "{what}: run {} at {}: {}",
-                item["run_id"].as_str().unwrap_or_default(),
-                item["head_sha"].as_str().unwrap_or_default(),
-                item["reason"].as_str().unwrap_or_default()
-            ));
-        }
+        let items = answer[list].as_array().map_or(&[][..], Vec::as_slice);
+        diagnostics.extend(
+            grouped_reasons(items)
+                .into_iter()
+                .map(|(reason, count)| format!("{count} {what}: {reason}")),
+        );
     }
     if answer["status"] != "available" {
         let reason = answer["reason"]
@@ -1004,6 +1002,20 @@ fn read_host_history(
     let history: RollingHistory =
         serde_json::from_slice(&bytes).map_err(|error| format!("unreadable history: {error}"))?;
     Ok((Some(history), cost))
+}
+
+/// Each distinct reason the plugin gave, first seen first, with how many items gave it. The run
+/// ids and commits stay in the plugin's answer; the report reads one line per reason.
+fn grouped_reasons(items: &[Value]) -> Vec<(&str, usize)> {
+    let mut grouped: Vec<(&str, usize)> = Vec::new();
+    for item in items {
+        let reason = item["reason"].as_str().unwrap_or_default();
+        match grouped.iter_mut().find(|(seen, _)| *seen == reason) {
+            Some((_, count)) => *count += 1,
+            None => grouped.push((reason, 1)),
+        }
+    }
+    grouped
 }
 
 fn look_up_workflow(args: &ReportArgs, wiring: &Wiring) -> Result<u64, String> {
