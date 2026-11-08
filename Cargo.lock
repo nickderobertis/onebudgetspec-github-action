@@ -601,6 +601,7 @@ name = "onebudgetspec-github-action-e2e"
 version = "0.0.0"
 dependencies = [
  "assert_cmd",
+ "onebudgetspec-core",
  "predicates",
  "serde_json",
  "tempfile",

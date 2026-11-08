@@ -9,8 +9,10 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tests/action-harness'))
+import jsonschema
 import yaml
 
+import fixture_repository
 import harness
 from harness import Host, Job, Repository, budgets_yaml, check_report, check_result, event_pull_request, zipped
 
@@ -1300,8 +1302,15 @@ class History(Journey):
         following = self.base()
         rolling = self.history_of(following.run_id)
         self.assertEqual([run['head_sha'] for run in rolling['runs']], [first.sha, following.sha])
-        self.assertIn(failed.sha, following.markdown())
-        self.assertIn('lost', following.markdown())
+        self.assert_loss_disclosed(following, failed)
+
+    def assert_loss_disclosed(self, following, failed):
+        """The failed push's run reads as one refused run and one lost entry, by reason alone."""
+        details = section(following.markdown(), 'details')
+        self.assertIn("\n- 1 history entries lost: this base commit's entry is not in the selected history\n", details)
+        self.assertIn('\n- 1 history runs refused: no artifact named budget-results: its upload failed or never ran\n', details)
+        self.assertNotIn(failed.sha[:7], details)
+        self.assertNotIn(f'run {failed.run_id}', details)
 
     def own_catalog(self):
         self.repository.write('budgets.yaml', budgets_yaml([
@@ -1338,7 +1347,7 @@ class History(Journey):
         following = self.base()
         heads = [run['head_sha'] for run in self.history_of(following.run_id)['runs']]
         self.assertEqual(heads, [first.sha, following.sha])
-        self.assertIn(failed.sha, following.markdown())
+        self.assert_loss_disclosed(following, failed)
         self.assertEqual(following.outcomes['final-upload'], 'success')
 
     def only_own_measures_catalog(self, own=OWN, labels=('ci-report',)):
@@ -2144,6 +2153,135 @@ class Degraded(Journey):
                                     cwd=self.repository.path, capture_output=True, text=True, check=False,
                                     env={**clean_environment(), **path, 'ONEVCS_GH': '/nonexistent/gh'})
             self.assertEqual(answer.returncode, 3, 'nothing says the host refused it, so this stays an error')
+
+
+RELEASED = Path(__file__).resolve().parent / 'fixtures/v0.2.0'
+
+
+class Compatibility(unittest.TestCase):
+    """What v0.2.0 wrote is read, and what this release writes keeps v0.2.0's shapes, verdicts and inputs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.released = json.loads((RELEASED / 'journey.json').read_text())
+        cls.schemas = json.loads((RELEASED / 'schema-bundle.json').read_text())['roots']
+
+    def conforms(self, document, root, released):
+        """Valid against v0.2.0's schema for its type, with exactly the fields v0.2.0 wrote."""
+        jsonschema.Draft202012Validator(self.schemas[root]).validate(document)
+        self.assertEqual(fixture_repository.key_paths(document), fixture_repository.key_paths(released), root)
+
+    def test_the_fixture_repository_keeps_v0_2_0s_verdicts_and_shapes(self):
+        journey = fixture_repository.run(harness)
+        self.assertEqual([job['name'] for job in journey['jobs']], [job['name'] for job in self.released['jobs']])
+        rendered = os.environ.get('JOURNEY_RENDERED')
+        for job, then in zip(journey['jobs'], self.released['jobs']):
+            with self.subTest(job=job['name']):
+                self.assertEqual((job['exit_code'], job['rows']), (then['exit_code'], then['rows']))
+                self.assertEqual(job['artifact_files'], then['artifact_files'])
+                self.assertEqual(sorted(job['telemetry']), sorted(then['telemetry']))
+                for path, telemetry in job['telemetry'].items():
+                    self.assertEqual(fixture_repository.key_paths(telemetry), fixture_repository.key_paths(then['telemetry'][path]))
+                if 'documents' not in then:
+                    continue
+                documents, released = job['documents'], then['documents']
+                for name, root in fixture_repository.SCHEMA_OF.items():
+                    self.conforms(documents[name], root, released[name])
+                self.assertEqual(fixture_repository.key_paths(documents['report-job.json']),
+                                 fixture_repository.key_paths(released['report-job.json']))
+                if 'rolling-history.json' in released:
+                    self.conforms(documents['rolling-history.json'], 'rolling-history', released['rolling-history.json'])
+                if then['comment']:
+                    self.conforms(history_block(job['comment']), 'report-history', history_block(then['comment']))
+                    self.assertTrue(job['comment'].startswith(job['markdown']), 'the comment leads with report.md, unchanged')
+                if rendered:
+                    # The Rust half renders the saved report with the released core and compares.
+                    pair = Path(rendered) / job['name']
+                    pair.mkdir()
+                    (pair / 'comparison-report.json').write_text(job['saved_report'])
+                    (pair / 'report.md').write_text(job['markdown'])
+
+    def test_the_action_takes_the_inputs_and_gives_the_outputs_v0_2_0_did(self):
+        def interface(path):
+            document = yaml.safe_load(path.read_text())
+            inputs = {name: (spec.get('required', False), spec.get('default')) for name, spec in document['inputs'].items()}
+            return inputs, sorted(document.get('outputs', {}))
+        self.assertEqual(interface(harness.ROOT / 'action.yml'), interface(RELEASED / 'action.yml'))
+
+    def test_what_v0_2_0_saved_and_posted_is_read(self):
+        host, repository = Host(), Repository()
+        self.addCleanup(host.close)
+        self.addCleanup(repository.close)
+        then = {job['name']: job for job in self.released['jobs']}
+        # The same commits as the captured journey, so its saved files name commits this checkout has.
+        fixture_repository.catalog(harness, repository, fixture_repository.BASE)
+        commits = [repository.commit('catalog')]
+        for index in range(fixture_repository.BASE_PUSHES):
+            commits.append(repository.commit(f'base {index + 1}'))
+            host.add_run(fixture_repository.FIRST_RUN + index, commits[-1], minute=fixture_repository.FIRST_RUN + index)
+        repository.git('checkout', '--quiet', '-b', 'feature')
+        for name, figures in (('first-head', fixture_repository.FIRST_HEAD), ('second-head', fixture_repository.SECOND_HEAD)):
+            fixture_repository.catalog(harness, repository, figures)
+            commits.append(repository.commit(name))
+        renamed = dict(zip(self.released['commits'], commits))
+
+        def written(text):
+            for released, here in renamed.items():
+                text = text.replace(released, here)
+            return text
+
+        # v0.2.0's rolling history on the last base run, and its standing comment on the pull request.
+        history = written(json.dumps(self.released['rolling_history']))
+        host.attach(fixture_repository.FIRST_RUN + 5, 'budget-results', zipped({'rolling-history.json': history}))
+        standing = written(then['second-head']['comment'])
+        host.comments.append({'id': 100, 'node_id': 'owned-100', 'body': standing,
+                              'html_url': 'https://github.com/owner/repo/pull/1#issuecomment-100'})
+        first, second, base = commits[-2], commits[-1], commits[fixture_repository.BASE_PUSHES]
+        host.head = second
+        job = harness.Job(host, repository, 'pull_request', second, run_id=1009, inputs=fixture_repository.INPUTS,
+                          event=harness.event_pull_request(1, second, base), base_ref='main').run()
+        self.assertEqual(job.exit_code, 0, job.stdout)
+
+        # The earlier head's flags are carried, folded, as v0.2.0 listed them; the comment is the same one.
+        [comment] = host.comments
+        self.assertEqual(comment['id'], 100)
+        flags = standing.split(f'\n{first} (attempt 1):', 1)[1].split('\n\n', 1)[0].splitlines()[1:]
+        self.assertEqual(len(flags), 3, standing)
+        earlier = section(comment['body'], 'earlier')
+        self.assertIn(f'\n{first} (attempt 1): 3 adverse flag(s)\n' + '\n'.join(flags) + '\n', earlier)
+        self.assertEqual([(entry['head_sha'], entry['run_id']) for entry in history_block(comment['body'])['entries']],
+                         [(first, '1007'), (second, '1009')])
+        # The baseline statistics are computed from the saved history: v0.2.0's own, row for row.
+        released_rows = {row['id']: row for row in then['second-head']['documents']['comparison-report.json']['rows']}
+        for budget, row in job.rows().items():
+            with self.subTest(budget=budget):
+                expected = released_rows[budget]
+                if budget != 'job-requests':
+                    self.assertEqual([row.get(key) for key in ('baseline_n', 'mean', 'sd')],
+                                     [expected.get(key) for key in ('baseline_n', 'mean', 'sd')])
+                self.assertEqual((row.get('verdict'), row['flag']), (expected.get('verdict'), expected['flag']))
+        self.assertEqual(job.rows()['job-requests']['baseline_n'], 6)
+
+        # The merged pull request's run saved its figures with v0.2.0; the base push shows them, not its own.
+        saved = then['second-head']['documents']
+        files = {name: written(json.dumps(document)) for name, document in saved.items()}
+        host.add_run(1010, second, minute=1010, event='pull_request')
+        host.attach(1010, 'budget-results', zipped({**files, 'report.md': written(then['second-head']['markdown'])}))
+        repository.git('checkout', '--quiet', 'main')
+        repository.git('merge', '--quiet', '--squash', 'feature')
+        fixture_repository.catalog(harness, repository, {budget: figure + 1000 for budget, figure in fixture_repository.BASE.items()})
+        merge = repository.commit('squash')
+        host.merge_pull_request(merge, second)
+        pushed = harness.Job(host, repository, 'push', merge, run_id=1011, inputs=fixture_repository.INPUTS).run()
+        figures = {result['id']: result['actual'] for result in saved['budget-run.json']['results']['results']
+                   if result['id'] != 'job-requests'}
+        self.assertEqual(sorted(figures), sorted(fixture_repository.BASE))
+        self.assertEqual({budget: pushed.rows()[budget]['current'] for budget in figures}, figures, pushed.markdown())
+        self.assertIn(f"{len(figures)} rows are the figures of merged pull request #1's run 1010", pushed.markdown())
+        # That push carries v0.2.0's history forward, in v0.2.0's shape.
+        rolling = json.loads(host.artifact_files(1011)['rolling-history.json'])
+        self.assertEqual([run['head_sha'] for run in rolling['runs']], commits[1:fixture_repository.BASE_PUSHES + 1] + [merge])
+        self.conforms(rolling, 'rolling-history', self.released['rolling_history'])
 
 
 class SessionBus(unittest.TestCase):
