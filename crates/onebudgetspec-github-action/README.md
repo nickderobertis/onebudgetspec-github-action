@@ -102,6 +102,18 @@ A fork's `pull_request` run is read-only: no comment, and no GitHub credential r
 to the job summary and artifact. `pull_request_target` and `workflow_run` hold a privileged token, so no budget command
 runs at all, whatever the workflow says.
 
+### The comment
+
+The comment is the core's report layout, posted as the core renders it. A summary line comes first, then
+**Needs attention**, open, with `Budget | Now · vs base | Reason` for every enforced overrun or error, report-only
+overrun and flagged row; its Reason reads, for example, `Flagged +1.4 SD` or `Over limit (report-only)`. It says
+`Nothing failed or was flagged.` when nothing does. **Within budget** follows collapsed, as `Budget | Now · vs base`,
+then a collapsed **Details** section: the repository, head and run, each row not measured on this run, why a figure
+is missing, and every diagnostic, the omitted-budgets line and the history lines among them. A history read that
+loses entries or refuses runs gives one line per distinct reason, such as `10 history entries lost: <reason>` or
+`2 history runs refused: <reason>`, with no run id or commit. The flags of the pull request's earlier heads follow,
+folded, then the hidden history that carries them to the next head.
+
 ### What each run saves
 
 The artifact holds `budget-run.json`, `comparison-input.json`, `comparison-report.json`, `report.md` and `report-job.json`,
@@ -114,10 +126,10 @@ repository's retention setting, and an expired baseline reads as unavailable wit
 Each base push reads one previous rolling file through `onebudgetspec-plugin-onevcs history`, appends its own completed
 result, holding the merged pull request's figures where it took them, deduplicates by commit, trims to 20 and uploads
 one new immutable file. A failed upload leaves the earlier one
-as the next run's source; the lost commit is disclosed. Concurrent pushes upload separately and files are never merged,
+as the next run's source; the loss is disclosed by its reason. Concurrent pushes upload separately and files are never merged,
 so an unrelated commit cannot enter. A push that measured nothing, or whose ordinary check could not run, saves no rolling
-file and says so, and the next push reads the one before it. Below five samples a row has no baseline, and from 5 to 19 it is
-provisional.
+file and says so, and the next push reads the one before it. Below five samples a row has no baseline mean, and its
+comment row reads `baseline <n>/5`.
 
 ### Requests
 

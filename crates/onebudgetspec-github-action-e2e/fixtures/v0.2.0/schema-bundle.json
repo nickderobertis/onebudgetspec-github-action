@@ -1,0 +1,2699 @@
+{
+ "roots": {
+  "budget-run": {
+   "$defs": {
+    "CheckReport": {
+     "additionalProperties": false,
+     "description": "What `check` answers with: one result per selected budget, in measurement order.",
+     "properties": {
+      "results": {
+       "description": "One result per selected budget.",
+       "items": {
+        "$ref": "#/$defs/CheckResult"
+       },
+       "type": "array"
+      },
+      "schema_version": {
+       "const": 1,
+       "description": "Always `1`.",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "schema_version",
+      "results"
+     ],
+     "title": "check-report",
+     "type": "object"
+    },
+    "CheckResult": {
+     "additionalProperties": false,
+     "description": "One budget's measurement.",
+     "properties": {
+      "actual": {
+       "description": "The measured value; null on an error.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "detail": {
+       "description": "The `detail` a `reported` command wrote; null when it wrote none.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "The budget's direction."
+      },
+      "ended_at": {
+       "description": "When the measurement ended (RFC 3339), never before `started_at`.",
+       "format": "date-time",
+       "type": "string"
+      },
+      "error": {
+       "description": "Why the measurement failed; null unless `verdict` is `error`.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "file": {
+       "description": "The budgets file's path, as discovered or given.",
+       "type": "string"
+      },
+      "headroom": {
+       "description": "`threshold - actual` under `max`, `actual - threshold` under `min`; negative when\nover, null on an error.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "headroom_percent": {
+       "description": "`headroom / threshold * 100`; null on an error or when the threshold is 0.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "host": {
+       "$ref": "#/$defs/Host",
+       "description": "The host conditions recorded beside this result."
+      },
+      "id": {
+       "description": "The budget's id.",
+       "type": "string"
+      },
+      "labels": {
+       "description": "The budget's labels, empty when it has none.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "started_at": {
+       "description": "When the measurement started (RFC 3339).",
+       "format": "date-time",
+       "type": "string"
+      },
+      "threshold": {
+       "description": "The budget's threshold.",
+       "format": "double",
+       "type": "number"
+      },
+      "unit": {
+       "description": "The budget's unit.",
+       "type": "string"
+      },
+      "verdict": {
+       "$ref": "#/$defs/Verdict",
+       "description": "`within`, `over` or `error`."
+      }
+     },
+     "required": [
+      "actual",
+      "detail",
+      "direction",
+      "ended_at",
+      "error",
+      "file",
+      "headroom",
+      "headroom_percent",
+      "host",
+      "id",
+      "labels",
+      "started_at",
+      "threshold",
+      "unit",
+      "verdict"
+     ],
+     "type": "object"
+    },
+    "Direction": {
+     "description": "Which side of the threshold is within.",
+     "oneOf": [
+      {
+       "const": "max",
+       "description": "Within when `actual <= threshold`.",
+       "type": "string"
+      },
+      {
+       "const": "min",
+       "description": "Within when `actual >= threshold`.",
+       "type": "string"
+      }
+     ]
+    },
+    "Host": {
+     "additionalProperties": false,
+     "description": "The host conditions recorded beside a result.",
+     "properties": {
+      "conditions": {
+       "additionalProperties": {
+        "type": "string"
+       },
+       "description": "Each condition the file declares, and for a `reported` result each condition its\ncommand returned, by name.",
+       "type": "object"
+      },
+      "cpus": {
+       "description": "The CPUs available to this process.",
+       "format": "uint32",
+       "minimum": 0,
+       "type": "integer"
+      },
+      "load1": {
+       "description": "The 1-minute load average; null where unreadable.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "mem_available_mib": {
+       "description": "Available memory in MiB; null where unreadable.",
+       "format": "uint64",
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "conditions",
+      "cpus",
+      "load1",
+      "mem_available_mib"
+     ],
+     "type": "object"
+    },
+    "ListedBudget": {
+     "additionalProperties": false,
+     "description": "One budget as `list` reports it: every field the file gives, plus the file.",
+     "properties": {
+      "command": {
+       "description": "The argv that measures it.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "description": {
+       "description": "The budget's description; null when it has none.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "The budget's direction."
+      },
+      "file": {
+       "description": "The budgets file's path, as discovered or given.",
+       "type": "string"
+      },
+      "id": {
+       "description": "The budget's id.",
+       "type": "string"
+      },
+      "labels": {
+       "description": "The budget's labels, empty when it has none.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "measure": {
+       "$ref": "#/$defs/Measure",
+       "description": "How the value is measured."
+      },
+      "threshold": {
+       "description": "The budget's threshold.",
+       "format": "double",
+       "type": "number"
+      },
+      "timeout_seconds": {
+       "description": "The budget's timeout; null when it has none.",
+       "format": "uint64",
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "unit": {
+       "description": "The budget's unit.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description",
+      "direction",
+      "file",
+      "id",
+      "labels",
+      "measure",
+      "threshold",
+      "timeout_seconds",
+      "unit"
+     ],
+     "type": "object"
+    },
+    "Measure": {
+     "description": "How a budget's value is measured.",
+     "oneOf": [
+      {
+       "const": "elapsed",
+       "description": "The command's wall clock, in seconds; a non-zero exit is an error.",
+       "type": "string"
+      },
+      {
+       "const": "reported",
+       "description": "The value the command writes to the file `ONEBUDGETSPEC_RESULT` names.",
+       "type": "string"
+      }
+     ]
+    },
+    "ResultNote": {
+     "additionalProperties": false,
+     "description": "The saved `ResultNote` wire contract.",
+     "properties": {
+      "file": {
+       "description": "Normalized repository-relative budgets file path.",
+       "type": "string"
+      },
+      "id": {
+       "description": "Budget id within its file.",
+       "type": "string"
+      },
+      "note": {
+       "description": "The text the report appends to this row's status.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "file",
+      "id",
+      "note"
+     ],
+     "type": "object"
+    },
+    "UnavailableBudget": {
+     "additionalProperties": false,
+     "description": "The saved `UnavailableBudget` wire contract.",
+     "properties": {
+      "file": {
+       "description": "Normalized repository-relative budgets file path.",
+       "type": "string"
+      },
+      "id": {
+       "description": "Budget id within its file.",
+       "type": "string"
+      },
+      "reason": {
+       "description": "Why the command could not supply an ordinary result.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "file",
+      "id",
+      "reason"
+     ],
+     "type": "object"
+    },
+    "Verdict": {
+     "description": "A result's verdict.",
+     "oneOf": [
+      {
+       "const": "within",
+       "description": "The actual value is on the budget's side of the threshold.",
+       "type": "string"
+      },
+      {
+       "const": "over",
+       "description": "The actual value is past the threshold.",
+       "type": "string"
+      },
+      {
+       "const": "error",
+       "description": "No value was measured; `error` says why.",
+       "type": "string"
+      }
+     ]
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false,
+   "description": "The saved `BudgetRun` wire contract.",
+   "properties": {
+    "attempt": {
+     "description": "Positive host attempt number; the latest completed attempt wins.",
+     "format": "uint32",
+     "minimum": 1,
+     "type": "integer"
+    },
+    "base_ref": {
+     "description": "Base branch reference used to select the history.",
+     "type": "string"
+    },
+    "catalog": {
+     "description": "Every discovered production budget, including unavailable measurements.",
+     "items": {
+      "$ref": "#/$defs/ListedBudget"
+     },
+     "type": "array"
+    },
+    "completed_at": {
+     "description": "Completion timestamp in RFC 3339.",
+     "format": "date-time",
+     "type": "string"
+    },
+    "enforcement_exclude_labels": {
+     "description": "Saved generic selection: matching catalog labels render as report-only.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "head_sha": {
+     "description": "Commit measured by this run; never substituted with another head.",
+     "type": "string"
+    },
+    "repository": {
+     "description": "Repository identity recorded by the producer.",
+     "type": "string"
+    },
+    "result_notes": {
+     "description": "One short note per catalog row, shown at the end of that row's report status.",
+     "items": {
+      "$ref": "#/$defs/ResultNote"
+     },
+     "type": "array"
+    },
+    "results": {
+     "$ref": "#/$defs/CheckReport",
+     "description": "Unmodified ordinary check results from completed measurements."
+    },
+    "run_id": {
+     "description": "Host workflow run identity.",
+     "type": "string"
+    },
+    "run_url": {
+     "description": "Host run holding the complete summary and artifacts; links may expire.",
+     "type": "string"
+    },
+    "schema_version": {
+     "const": 1,
+     "description": "Always `1`.",
+     "type": "integer"
+    },
+    "unavailable": {
+     "description": "Explicit missing-data reasons; no values are inferred.",
+     "items": {
+      "$ref": "#/$defs/UnavailableBudget"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "schema_version",
+    "repository",
+    "head_sha",
+    "base_ref",
+    "run_id",
+    "run_url",
+    "attempt",
+    "completed_at",
+    "catalog",
+    "results",
+    "unavailable"
+   ],
+   "title": "BudgetRun",
+   "type": "object"
+  },
+  "budgets-file": {
+   "$defs": {
+    "Budget": {
+     "additionalProperties": false,
+     "description": "One budget: a command that measures a value, and the threshold it must stay within.",
+     "properties": {
+      "command": {
+       "description": "The argv to run, once, from the directory holding the file, with no shell.",
+       "items": {
+        "type": "string"
+       },
+       "minItems": 1,
+       "type": "array"
+      },
+      "description": {
+       "description": "Free text: what is measured.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "Which side of the threshold is within."
+      },
+      "id": {
+       "description": "Unique in the file, and across every file one discovery finds.",
+       "pattern": "^[a-z][a-z0-9-]*$",
+       "type": "string"
+      },
+      "labels": {
+       "description": "Free tags a consumer selects on; the library attaches no meaning to them.",
+       "items": {
+        "pattern": "^[a-z][a-z0-9-]*$",
+        "type": "string"
+       },
+       "type": "array",
+       "uniqueItems": true
+      },
+      "measure": {
+       "$ref": "#/$defs/Measure",
+       "description": "How the value is measured."
+      },
+      "threshold": {
+       "description": "A finite, non-negative number in `unit`.",
+       "format": "double",
+       "minimum": 0,
+       "type": "number"
+      },
+      "timeout_seconds": {
+       "description": "Past this many seconds the measurement is an error.",
+       "format": "uint64",
+       "minimum": 1,
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "unit": {
+       "description": "A free label echoed in results. An `elapsed` budget's unit is `seconds`.",
+       "pattern": "^[a-z][a-z0-9_/%-]*$",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "measure",
+      "command",
+      "unit",
+      "direction",
+      "threshold"
+     ],
+     "type": "object"
+    },
+    "Condition": {
+     "additionalProperties": false,
+     "description": "A host condition a file declares: a command whose trimmed stdout is recorded beside\nevery result measured from the file.",
+     "properties": {
+      "command": {
+       "description": "The argv to run, once per file per check, from the directory holding the file. A\nfailure records `unknown`.",
+       "items": {
+        "type": "string"
+       },
+       "minItems": 1,
+       "type": "array"
+      },
+      "name": {
+       "description": "Unique in the file, and never `load1`, `cpus` or `mem_available_mib`.",
+       "pattern": "^[a-z][a-z0-9_]*$",
+       "type": "string"
+      }
+     },
+     "required": [
+      "name",
+      "command"
+     ],
+     "type": "object"
+    },
+    "Direction": {
+     "description": "Which side of the threshold is within.",
+     "oneOf": [
+      {
+       "const": "max",
+       "description": "Within when `actual <= threshold`.",
+       "type": "string"
+      },
+      {
+       "const": "min",
+       "description": "Within when `actual >= threshold`.",
+       "type": "string"
+      }
+     ]
+    },
+    "Measure": {
+     "description": "How a budget's value is measured.",
+     "oneOf": [
+      {
+       "const": "elapsed",
+       "description": "The command's wall clock, in seconds; a non-zero exit is an error.",
+       "type": "string"
+      },
+      {
+       "const": "reported",
+       "description": "The value the command writes to the file `ONEBUDGETSPEC_RESULT` names.",
+       "type": "string"
+      }
+     ]
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false,
+   "description": "One `budgets.yaml` file.",
+   "properties": {
+    "budgets": {
+     "description": "The budgets this file registers, measured in this order.",
+     "items": {
+      "$ref": "#/$defs/Budget"
+     },
+     "type": "array"
+    },
+    "conditions": {
+     "description": "Host conditions recorded beside every result measured from this file.",
+     "items": {
+      "$ref": "#/$defs/Condition"
+     },
+     "type": "array"
+    },
+    "schema_version": {
+     "const": 1,
+     "description": "Always `1`.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "schema_version",
+    "budgets"
+   ],
+   "title": "budgets-file",
+   "type": "object"
+  },
+  "check-report": {
+   "$defs": {
+    "CheckResult": {
+     "additionalProperties": false,
+     "description": "One budget's measurement.",
+     "properties": {
+      "actual": {
+       "description": "The measured value; null on an error.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "detail": {
+       "description": "The `detail` a `reported` command wrote; null when it wrote none.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "The budget's direction."
+      },
+      "ended_at": {
+       "description": "When the measurement ended (RFC 3339), never before `started_at`.",
+       "format": "date-time",
+       "type": "string"
+      },
+      "error": {
+       "description": "Why the measurement failed; null unless `verdict` is `error`.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "file": {
+       "description": "The budgets file's path, as discovered or given.",
+       "type": "string"
+      },
+      "headroom": {
+       "description": "`threshold - actual` under `max`, `actual - threshold` under `min`; negative when\nover, null on an error.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "headroom_percent": {
+       "description": "`headroom / threshold * 100`; null on an error or when the threshold is 0.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "host": {
+       "$ref": "#/$defs/Host",
+       "description": "The host conditions recorded beside this result."
+      },
+      "id": {
+       "description": "The budget's id.",
+       "type": "string"
+      },
+      "labels": {
+       "description": "The budget's labels, empty when it has none.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "started_at": {
+       "description": "When the measurement started (RFC 3339).",
+       "format": "date-time",
+       "type": "string"
+      },
+      "threshold": {
+       "description": "The budget's threshold.",
+       "format": "double",
+       "type": "number"
+      },
+      "unit": {
+       "description": "The budget's unit.",
+       "type": "string"
+      },
+      "verdict": {
+       "$ref": "#/$defs/Verdict",
+       "description": "`within`, `over` or `error`."
+      }
+     },
+     "required": [
+      "actual",
+      "detail",
+      "direction",
+      "ended_at",
+      "error",
+      "file",
+      "headroom",
+      "headroom_percent",
+      "host",
+      "id",
+      "labels",
+      "started_at",
+      "threshold",
+      "unit",
+      "verdict"
+     ],
+     "type": "object"
+    },
+    "Direction": {
+     "description": "Which side of the threshold is within.",
+     "oneOf": [
+      {
+       "const": "max",
+       "description": "Within when `actual <= threshold`.",
+       "type": "string"
+      },
+      {
+       "const": "min",
+       "description": "Within when `actual >= threshold`.",
+       "type": "string"
+      }
+     ]
+    },
+    "Host": {
+     "additionalProperties": false,
+     "description": "The host conditions recorded beside a result.",
+     "properties": {
+      "conditions": {
+       "additionalProperties": {
+        "type": "string"
+       },
+       "description": "Each condition the file declares, and for a `reported` result each condition its\ncommand returned, by name.",
+       "type": "object"
+      },
+      "cpus": {
+       "description": "The CPUs available to this process.",
+       "format": "uint32",
+       "minimum": 0,
+       "type": "integer"
+      },
+      "load1": {
+       "description": "The 1-minute load average; null where unreadable.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "mem_available_mib": {
+       "description": "Available memory in MiB; null where unreadable.",
+       "format": "uint64",
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "conditions",
+      "cpus",
+      "load1",
+      "mem_available_mib"
+     ],
+     "type": "object"
+    },
+    "Verdict": {
+     "description": "A result's verdict.",
+     "oneOf": [
+      {
+       "const": "within",
+       "description": "The actual value is on the budget's side of the threshold.",
+       "type": "string"
+      },
+      {
+       "const": "over",
+       "description": "The actual value is past the threshold.",
+       "type": "string"
+      },
+      {
+       "const": "error",
+       "description": "No value was measured; `error` says why.",
+       "type": "string"
+      }
+     ]
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false,
+   "description": "What `check` answers with: one result per selected budget, in measurement order.",
+   "properties": {
+    "results": {
+     "description": "One result per selected budget.",
+     "items": {
+      "$ref": "#/$defs/CheckResult"
+     },
+     "type": "array"
+    },
+    "schema_version": {
+     "const": 1,
+     "description": "Always `1`.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "schema_version",
+    "results"
+   ],
+   "title": "check-report",
+   "type": "object"
+  },
+  "comparison-input": {
+   "$defs": {
+    "BudgetRun": {
+     "additionalProperties": false,
+     "description": "The saved `BudgetRun` wire contract.",
+     "properties": {
+      "attempt": {
+       "description": "Positive host attempt number; the latest completed attempt wins.",
+       "format": "uint32",
+       "minimum": 1,
+       "type": "integer"
+      },
+      "base_ref": {
+       "description": "Base branch reference used to select the history.",
+       "type": "string"
+      },
+      "catalog": {
+       "description": "Every discovered production budget, including unavailable measurements.",
+       "items": {
+        "$ref": "#/$defs/ListedBudget"
+       },
+       "type": "array"
+      },
+      "completed_at": {
+       "description": "Completion timestamp in RFC 3339.",
+       "format": "date-time",
+       "type": "string"
+      },
+      "enforcement_exclude_labels": {
+       "description": "Saved generic selection: matching catalog labels render as report-only.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "head_sha": {
+       "description": "Commit measured by this run; never substituted with another head.",
+       "type": "string"
+      },
+      "repository": {
+       "description": "Repository identity recorded by the producer.",
+       "type": "string"
+      },
+      "result_notes": {
+       "description": "One short note per catalog row, shown at the end of that row's report status.",
+       "items": {
+        "$ref": "#/$defs/ResultNote"
+       },
+       "type": "array"
+      },
+      "results": {
+       "$ref": "#/$defs/CheckReport",
+       "description": "Unmodified ordinary check results from completed measurements."
+      },
+      "run_id": {
+       "description": "Host workflow run identity.",
+       "type": "string"
+      },
+      "run_url": {
+       "description": "Host run holding the complete summary and artifacts; links may expire.",
+       "type": "string"
+      },
+      "schema_version": {
+       "const": 1,
+       "description": "Always `1`.",
+       "type": "integer"
+      },
+      "unavailable": {
+       "description": "Explicit missing-data reasons; no values are inferred.",
+       "items": {
+        "$ref": "#/$defs/UnavailableBudget"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "schema_version",
+      "repository",
+      "head_sha",
+      "base_ref",
+      "run_id",
+      "run_url",
+      "attempt",
+      "completed_at",
+      "catalog",
+      "results",
+      "unavailable"
+     ],
+     "type": "object"
+    },
+    "CheckReport": {
+     "additionalProperties": false,
+     "description": "What `check` answers with: one result per selected budget, in measurement order.",
+     "properties": {
+      "results": {
+       "description": "One result per selected budget.",
+       "items": {
+        "$ref": "#/$defs/CheckResult"
+       },
+       "type": "array"
+      },
+      "schema_version": {
+       "const": 1,
+       "description": "Always `1`.",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "schema_version",
+      "results"
+     ],
+     "title": "check-report",
+     "type": "object"
+    },
+    "CheckResult": {
+     "additionalProperties": false,
+     "description": "One budget's measurement.",
+     "properties": {
+      "actual": {
+       "description": "The measured value; null on an error.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "detail": {
+       "description": "The `detail` a `reported` command wrote; null when it wrote none.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "The budget's direction."
+      },
+      "ended_at": {
+       "description": "When the measurement ended (RFC 3339), never before `started_at`.",
+       "format": "date-time",
+       "type": "string"
+      },
+      "error": {
+       "description": "Why the measurement failed; null unless `verdict` is `error`.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "file": {
+       "description": "The budgets file's path, as discovered or given.",
+       "type": "string"
+      },
+      "headroom": {
+       "description": "`threshold - actual` under `max`, `actual - threshold` under `min`; negative when\nover, null on an error.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "headroom_percent": {
+       "description": "`headroom / threshold * 100`; null on an error or when the threshold is 0.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "host": {
+       "$ref": "#/$defs/Host",
+       "description": "The host conditions recorded beside this result."
+      },
+      "id": {
+       "description": "The budget's id.",
+       "type": "string"
+      },
+      "labels": {
+       "description": "The budget's labels, empty when it has none.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "started_at": {
+       "description": "When the measurement started (RFC 3339).",
+       "format": "date-time",
+       "type": "string"
+      },
+      "threshold": {
+       "description": "The budget's threshold.",
+       "format": "double",
+       "type": "number"
+      },
+      "unit": {
+       "description": "The budget's unit.",
+       "type": "string"
+      },
+      "verdict": {
+       "$ref": "#/$defs/Verdict",
+       "description": "`within`, `over` or `error`."
+      }
+     },
+     "required": [
+      "actual",
+      "detail",
+      "direction",
+      "ended_at",
+      "error",
+      "file",
+      "headroom",
+      "headroom_percent",
+      "host",
+      "id",
+      "labels",
+      "started_at",
+      "threshold",
+      "unit",
+      "verdict"
+     ],
+     "type": "object"
+    },
+    "Direction": {
+     "description": "Which side of the threshold is within.",
+     "oneOf": [
+      {
+       "const": "max",
+       "description": "Within when `actual <= threshold`.",
+       "type": "string"
+      },
+      {
+       "const": "min",
+       "description": "Within when `actual >= threshold`.",
+       "type": "string"
+      }
+     ]
+    },
+    "Host": {
+     "additionalProperties": false,
+     "description": "The host conditions recorded beside a result.",
+     "properties": {
+      "conditions": {
+       "additionalProperties": {
+        "type": "string"
+       },
+       "description": "Each condition the file declares, and for a `reported` result each condition its\ncommand returned, by name.",
+       "type": "object"
+      },
+      "cpus": {
+       "description": "The CPUs available to this process.",
+       "format": "uint32",
+       "minimum": 0,
+       "type": "integer"
+      },
+      "load1": {
+       "description": "The 1-minute load average; null where unreadable.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "mem_available_mib": {
+       "description": "Available memory in MiB; null where unreadable.",
+       "format": "uint64",
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "conditions",
+      "cpus",
+      "load1",
+      "mem_available_mib"
+     ],
+     "type": "object"
+    },
+    "ListedBudget": {
+     "additionalProperties": false,
+     "description": "One budget as `list` reports it: every field the file gives, plus the file.",
+     "properties": {
+      "command": {
+       "description": "The argv that measures it.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "description": {
+       "description": "The budget's description; null when it has none.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "The budget's direction."
+      },
+      "file": {
+       "description": "The budgets file's path, as discovered or given.",
+       "type": "string"
+      },
+      "id": {
+       "description": "The budget's id.",
+       "type": "string"
+      },
+      "labels": {
+       "description": "The budget's labels, empty when it has none.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "measure": {
+       "$ref": "#/$defs/Measure",
+       "description": "How the value is measured."
+      },
+      "threshold": {
+       "description": "The budget's threshold.",
+       "format": "double",
+       "type": "number"
+      },
+      "timeout_seconds": {
+       "description": "The budget's timeout; null when it has none.",
+       "format": "uint64",
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "unit": {
+       "description": "The budget's unit.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description",
+      "direction",
+      "file",
+      "id",
+      "labels",
+      "measure",
+      "threshold",
+      "timeout_seconds",
+      "unit"
+     ],
+     "type": "object"
+    },
+    "Measure": {
+     "description": "How a budget's value is measured.",
+     "oneOf": [
+      {
+       "const": "elapsed",
+       "description": "The command's wall clock, in seconds; a non-zero exit is an error.",
+       "type": "string"
+      },
+      {
+       "const": "reported",
+       "description": "The value the command writes to the file `ONEBUDGETSPEC_RESULT` names.",
+       "type": "string"
+      }
+     ]
+    },
+    "ResultNote": {
+     "additionalProperties": false,
+     "description": "The saved `ResultNote` wire contract.",
+     "properties": {
+      "file": {
+       "description": "Normalized repository-relative budgets file path.",
+       "type": "string"
+      },
+      "id": {
+       "description": "Budget id within its file.",
+       "type": "string"
+      },
+      "note": {
+       "description": "The text the report appends to this row's status.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "file",
+      "id",
+      "note"
+     ],
+     "type": "object"
+    },
+    "UnavailableBudget": {
+     "additionalProperties": false,
+     "description": "The saved `UnavailableBudget` wire contract.",
+     "properties": {
+      "file": {
+       "description": "Normalized repository-relative budgets file path.",
+       "type": "string"
+      },
+      "id": {
+       "description": "Budget id within its file.",
+       "type": "string"
+      },
+      "reason": {
+       "description": "Why the command could not supply an ordinary result.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "file",
+      "id",
+      "reason"
+     ],
+     "type": "object"
+    },
+    "Verdict": {
+     "description": "A result's verdict.",
+     "oneOf": [
+      {
+       "const": "within",
+       "description": "The actual value is on the budget's side of the threshold.",
+       "type": "string"
+      },
+      {
+       "const": "over",
+       "description": "The actual value is past the threshold.",
+       "type": "string"
+      },
+      {
+       "const": "error",
+       "description": "No value was measured; `error` says why.",
+       "type": "string"
+      }
+     ]
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false,
+   "description": "The saved `ComparisonInput` wire contract.",
+   "properties": {
+    "baseline": {
+     "description": "Saved base observations; at most 20 unique heads are selected.",
+     "items": {
+      "$ref": "#/$defs/BudgetRun"
+     },
+     "type": "array"
+    },
+    "current": {
+     "$ref": "#/$defs/BudgetRun",
+     "description": "Current ordinary observations, independent of the baseline."
+    },
+    "schema_version": {
+     "const": 1,
+     "description": "Always `1`.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "schema_version",
+    "current",
+    "baseline"
+   ],
+   "title": "ComparisonInput",
+   "type": "object"
+  },
+  "comparison-report": {
+   "$defs": {
+    "BudgetRun": {
+     "additionalProperties": false,
+     "description": "The saved `BudgetRun` wire contract.",
+     "properties": {
+      "attempt": {
+       "description": "Positive host attempt number; the latest completed attempt wins.",
+       "format": "uint32",
+       "minimum": 1,
+       "type": "integer"
+      },
+      "base_ref": {
+       "description": "Base branch reference used to select the history.",
+       "type": "string"
+      },
+      "catalog": {
+       "description": "Every discovered production budget, including unavailable measurements.",
+       "items": {
+        "$ref": "#/$defs/ListedBudget"
+       },
+       "type": "array"
+      },
+      "completed_at": {
+       "description": "Completion timestamp in RFC 3339.",
+       "format": "date-time",
+       "type": "string"
+      },
+      "enforcement_exclude_labels": {
+       "description": "Saved generic selection: matching catalog labels render as report-only.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "head_sha": {
+       "description": "Commit measured by this run; never substituted with another head.",
+       "type": "string"
+      },
+      "repository": {
+       "description": "Repository identity recorded by the producer.",
+       "type": "string"
+      },
+      "result_notes": {
+       "description": "One short note per catalog row, shown at the end of that row's report status.",
+       "items": {
+        "$ref": "#/$defs/ResultNote"
+       },
+       "type": "array"
+      },
+      "results": {
+       "$ref": "#/$defs/CheckReport",
+       "description": "Unmodified ordinary check results from completed measurements."
+      },
+      "run_id": {
+       "description": "Host workflow run identity.",
+       "type": "string"
+      },
+      "run_url": {
+       "description": "Host run holding the complete summary and artifacts; links may expire.",
+       "type": "string"
+      },
+      "schema_version": {
+       "const": 1,
+       "description": "Always `1`.",
+       "type": "integer"
+      },
+      "unavailable": {
+       "description": "Explicit missing-data reasons; no values are inferred.",
+       "items": {
+        "$ref": "#/$defs/UnavailableBudget"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "schema_version",
+      "repository",
+      "head_sha",
+      "base_ref",
+      "run_id",
+      "run_url",
+      "attempt",
+      "completed_at",
+      "catalog",
+      "results",
+      "unavailable"
+     ],
+     "type": "object"
+    },
+    "CheckReport": {
+     "additionalProperties": false,
+     "description": "What `check` answers with: one result per selected budget, in measurement order.",
+     "properties": {
+      "results": {
+       "description": "One result per selected budget.",
+       "items": {
+        "$ref": "#/$defs/CheckResult"
+       },
+       "type": "array"
+      },
+      "schema_version": {
+       "const": 1,
+       "description": "Always `1`.",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "schema_version",
+      "results"
+     ],
+     "title": "check-report",
+     "type": "object"
+    },
+    "CheckResult": {
+     "additionalProperties": false,
+     "description": "One budget's measurement.",
+     "properties": {
+      "actual": {
+       "description": "The measured value; null on an error.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "detail": {
+       "description": "The `detail` a `reported` command wrote; null when it wrote none.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "The budget's direction."
+      },
+      "ended_at": {
+       "description": "When the measurement ended (RFC 3339), never before `started_at`.",
+       "format": "date-time",
+       "type": "string"
+      },
+      "error": {
+       "description": "Why the measurement failed; null unless `verdict` is `error`.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "file": {
+       "description": "The budgets file's path, as discovered or given.",
+       "type": "string"
+      },
+      "headroom": {
+       "description": "`threshold - actual` under `max`, `actual - threshold` under `min`; negative when\nover, null on an error.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "headroom_percent": {
+       "description": "`headroom / threshold * 100`; null on an error or when the threshold is 0.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "host": {
+       "$ref": "#/$defs/Host",
+       "description": "The host conditions recorded beside this result."
+      },
+      "id": {
+       "description": "The budget's id.",
+       "type": "string"
+      },
+      "labels": {
+       "description": "The budget's labels, empty when it has none.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "started_at": {
+       "description": "When the measurement started (RFC 3339).",
+       "format": "date-time",
+       "type": "string"
+      },
+      "threshold": {
+       "description": "The budget's threshold.",
+       "format": "double",
+       "type": "number"
+      },
+      "unit": {
+       "description": "The budget's unit.",
+       "type": "string"
+      },
+      "verdict": {
+       "$ref": "#/$defs/Verdict",
+       "description": "`within`, `over` or `error`."
+      }
+     },
+     "required": [
+      "actual",
+      "detail",
+      "direction",
+      "ended_at",
+      "error",
+      "file",
+      "headroom",
+      "headroom_percent",
+      "host",
+      "id",
+      "labels",
+      "started_at",
+      "threshold",
+      "unit",
+      "verdict"
+     ],
+     "type": "object"
+    },
+    "ComparisonRow": {
+     "additionalProperties": false,
+     "description": "The saved `ComparisonRow` wire contract.",
+     "properties": {
+      "baseline_n": {
+       "description": "Number of eligible unique base commits, at most 20.",
+       "format": "uint32",
+       "minimum": 0,
+       "type": "integer"
+      },
+      "current": {
+       "description": "Current ordinary observations, independent of the baseline.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "Which side of the threshold is within."
+      },
+      "file": {
+       "description": "Normalized repository-relative budgets file path.",
+       "type": "string"
+      },
+      "flag": {
+       "description": "Adverse movement of at least one SD, or an adverse constant-baseline change.",
+       "type": "boolean"
+      },
+      "id": {
+       "description": "Budget id within its file.",
+       "type": "string"
+      },
+      "mean": {
+       "description": "Baseline arithmetic mean, available from five samples.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "percent_change": {
+       "description": "Signed change divided by absolute mean times 100; absent for zero mean.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "sd": {
+       "description": "Sample standard deviation using n minus one.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "sigma_change": {
+       "description": "Signed change divided by sample SD; absent for changed constant baselines.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "threshold": {
+       "description": "Ordinary declared threshold, excluded from baseline identity.",
+       "format": "double",
+       "type": "number"
+      },
+      "unavailable": {
+       "description": "Explicit missing-data reasons; no values are inferred.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "unit": {
+       "description": "Declared measurement unit.",
+       "type": "string"
+      },
+      "verdict": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/Verdict"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "description": "The observed ordinary verdict; absent when no measurement completed."
+      }
+     },
+     "required": [
+      "file",
+      "id",
+      "unit",
+      "direction",
+      "threshold",
+      "baseline_n",
+      "flag"
+     ],
+     "type": "object"
+    },
+    "Direction": {
+     "description": "Which side of the threshold is within.",
+     "oneOf": [
+      {
+       "const": "max",
+       "description": "Within when `actual <= threshold`.",
+       "type": "string"
+      },
+      {
+       "const": "min",
+       "description": "Within when `actual >= threshold`.",
+       "type": "string"
+      }
+     ]
+    },
+    "Host": {
+     "additionalProperties": false,
+     "description": "The host conditions recorded beside a result.",
+     "properties": {
+      "conditions": {
+       "additionalProperties": {
+        "type": "string"
+       },
+       "description": "Each condition the file declares, and for a `reported` result each condition its\ncommand returned, by name.",
+       "type": "object"
+      },
+      "cpus": {
+       "description": "The CPUs available to this process.",
+       "format": "uint32",
+       "minimum": 0,
+       "type": "integer"
+      },
+      "load1": {
+       "description": "The 1-minute load average; null where unreadable.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "mem_available_mib": {
+       "description": "Available memory in MiB; null where unreadable.",
+       "format": "uint64",
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "conditions",
+      "cpus",
+      "load1",
+      "mem_available_mib"
+     ],
+     "type": "object"
+    },
+    "ListedBudget": {
+     "additionalProperties": false,
+     "description": "One budget as `list` reports it: every field the file gives, plus the file.",
+     "properties": {
+      "command": {
+       "description": "The argv that measures it.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "description": {
+       "description": "The budget's description; null when it has none.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "The budget's direction."
+      },
+      "file": {
+       "description": "The budgets file's path, as discovered or given.",
+       "type": "string"
+      },
+      "id": {
+       "description": "The budget's id.",
+       "type": "string"
+      },
+      "labels": {
+       "description": "The budget's labels, empty when it has none.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "measure": {
+       "$ref": "#/$defs/Measure",
+       "description": "How the value is measured."
+      },
+      "threshold": {
+       "description": "The budget's threshold.",
+       "format": "double",
+       "type": "number"
+      },
+      "timeout_seconds": {
+       "description": "The budget's timeout; null when it has none.",
+       "format": "uint64",
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "unit": {
+       "description": "The budget's unit.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description",
+      "direction",
+      "file",
+      "id",
+      "labels",
+      "measure",
+      "threshold",
+      "timeout_seconds",
+      "unit"
+     ],
+     "type": "object"
+    },
+    "Measure": {
+     "description": "How a budget's value is measured.",
+     "oneOf": [
+      {
+       "const": "elapsed",
+       "description": "The command's wall clock, in seconds; a non-zero exit is an error.",
+       "type": "string"
+      },
+      {
+       "const": "reported",
+       "description": "The value the command writes to the file `ONEBUDGETSPEC_RESULT` names.",
+       "type": "string"
+      }
+     ]
+    },
+    "ResultNote": {
+     "additionalProperties": false,
+     "description": "The saved `ResultNote` wire contract.",
+     "properties": {
+      "file": {
+       "description": "Normalized repository-relative budgets file path.",
+       "type": "string"
+      },
+      "id": {
+       "description": "Budget id within its file.",
+       "type": "string"
+      },
+      "note": {
+       "description": "The text the report appends to this row's status.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "file",
+      "id",
+      "note"
+     ],
+     "type": "object"
+    },
+    "UnavailableBudget": {
+     "additionalProperties": false,
+     "description": "The saved `UnavailableBudget` wire contract.",
+     "properties": {
+      "file": {
+       "description": "Normalized repository-relative budgets file path.",
+       "type": "string"
+      },
+      "id": {
+       "description": "Budget id within its file.",
+       "type": "string"
+      },
+      "reason": {
+       "description": "Why the command could not supply an ordinary result.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "file",
+      "id",
+      "reason"
+     ],
+     "type": "object"
+    },
+    "Verdict": {
+     "description": "A result's verdict.",
+     "oneOf": [
+      {
+       "const": "within",
+       "description": "The actual value is on the budget's side of the threshold.",
+       "type": "string"
+      },
+      {
+       "const": "over",
+       "description": "The actual value is past the threshold.",
+       "type": "string"
+      },
+      {
+       "const": "error",
+       "description": "No value was measured; `error` says why.",
+       "type": "string"
+      }
+     ]
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false,
+   "description": "The saved `ComparisonReport` wire contract.",
+   "properties": {
+    "current": {
+     "$ref": "#/$defs/BudgetRun",
+     "description": "Current ordinary observations, independent of the baseline."
+    },
+    "diagnostics": {
+     "description": "Rejected baseline entries, saved provenance and delivery diagnostics.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "rows": {
+     "description": "Every catalog budget, with ordinary errors and failures first.",
+     "items": {
+      "$ref": "#/$defs/ComparisonRow"
+     },
+     "type": "array"
+    },
+    "schema_version": {
+     "const": 1,
+     "description": "Always `1`.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "schema_version",
+    "current",
+    "rows",
+    "diagnostics"
+   ],
+   "title": "ComparisonReport",
+   "type": "object"
+  },
+  "delivery-result": {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false,
+   "description": "The saved `DeliveryResult` wire contract.",
+   "properties": {
+    "delivered": {
+     "description": "Whether the host accepted the report.",
+     "type": "boolean"
+    },
+    "diagnostic": {
+     "description": "Why delivery failed or degraded; independent of budget verdicts.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "url": {
+     "description": "Published report location when supplied by the host.",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "delivered"
+   ],
+   "title": "DeliveryResult",
+   "type": "object"
+  },
+  "list-report": {
+   "$defs": {
+    "Direction": {
+     "description": "Which side of the threshold is within.",
+     "oneOf": [
+      {
+       "const": "max",
+       "description": "Within when `actual <= threshold`.",
+       "type": "string"
+      },
+      {
+       "const": "min",
+       "description": "Within when `actual >= threshold`.",
+       "type": "string"
+      }
+     ]
+    },
+    "ListedBudget": {
+     "additionalProperties": false,
+     "description": "One budget as `list` reports it: every field the file gives, plus the file.",
+     "properties": {
+      "command": {
+       "description": "The argv that measures it.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "description": {
+       "description": "The budget's description; null when it has none.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "The budget's direction."
+      },
+      "file": {
+       "description": "The budgets file's path, as discovered or given.",
+       "type": "string"
+      },
+      "id": {
+       "description": "The budget's id.",
+       "type": "string"
+      },
+      "labels": {
+       "description": "The budget's labels, empty when it has none.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "measure": {
+       "$ref": "#/$defs/Measure",
+       "description": "How the value is measured."
+      },
+      "threshold": {
+       "description": "The budget's threshold.",
+       "format": "double",
+       "type": "number"
+      },
+      "timeout_seconds": {
+       "description": "The budget's timeout; null when it has none.",
+       "format": "uint64",
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "unit": {
+       "description": "The budget's unit.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description",
+      "direction",
+      "file",
+      "id",
+      "labels",
+      "measure",
+      "threshold",
+      "timeout_seconds",
+      "unit"
+     ],
+     "type": "object"
+    },
+    "Measure": {
+     "description": "How a budget's value is measured.",
+     "oneOf": [
+      {
+       "const": "elapsed",
+       "description": "The command's wall clock, in seconds; a non-zero exit is an error.",
+       "type": "string"
+      },
+      {
+       "const": "reported",
+       "description": "The value the command writes to the file `ONEBUDGETSPEC_RESULT` names.",
+       "type": "string"
+      }
+     ]
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false,
+   "description": "What `list` answers with: the selected budgets, in file order.",
+   "properties": {
+    "budgets": {
+     "description": "The selected budgets.",
+     "items": {
+      "$ref": "#/$defs/ListedBudget"
+     },
+     "type": "array"
+    },
+    "schema_version": {
+     "const": 1,
+     "description": "Always `1`.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "schema_version",
+    "budgets"
+   ],
+   "title": "list-report",
+   "type": "object"
+  },
+  "publish-request": {
+   "$defs": {
+    "HistoricalFlag": {
+     "additionalProperties": false,
+     "description": "The saved `HistoricalFlag` wire contract.",
+     "properties": {
+      "constant_baseline_change": {
+       "description": "Whether a constant baseline changed adversely.",
+       "type": "boolean"
+      },
+      "file": {
+       "description": "Normalized repository-relative budgets file path.",
+       "type": "string"
+      },
+      "id": {
+       "description": "Budget id within its file.",
+       "type": "string"
+      },
+      "sigma_change": {
+       "description": "Signed change in sample SD units; absent for changed constant baselines.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "file",
+      "id",
+      "constant_baseline_change"
+     ],
+     "type": "object"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false,
+   "description": "The saved `PublishRequest` wire contract.",
+   "properties": {
+    "attempt": {
+     "description": "Positive host attempt number; the latest completed attempt wins.",
+     "format": "uint32",
+     "minimum": 1,
+     "type": "integer"
+    },
+    "destination": {
+     "description": "Host-specific standing report destination.",
+     "type": "string"
+    },
+    "flags": {
+     "description": "Adverse movements only; improvements create no history flag.",
+     "items": {
+      "$ref": "#/$defs/HistoricalFlag"
+     },
+     "type": "array"
+    },
+    "head_sha": {
+     "description": "Commit measured by this run; never substituted with another head.",
+     "type": "string"
+    },
+    "key": {
+     "description": "Stable standing report identity at the destination.",
+     "type": "string"
+    },
+    "markdown": {
+     "description": "Current rendered budget report.",
+     "type": "string"
+    },
+    "run_id": {
+     "description": "Host workflow run identity.",
+     "type": "string"
+    },
+    "run_url": {
+     "description": "Host run holding the complete summary and artifacts; links may expire.",
+     "type": "string"
+    },
+    "schema_version": {
+     "const": 1,
+     "description": "Always `1`.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "schema_version",
+    "destination",
+    "key",
+    "head_sha",
+    "run_id",
+    "run_url",
+    "markdown",
+    "attempt",
+    "flags"
+   ],
+   "title": "PublishRequest",
+   "type": "object"
+  },
+  "report-history": {
+   "$defs": {
+    "HistoricalFlag": {
+     "additionalProperties": false,
+     "description": "The saved `HistoricalFlag` wire contract.",
+     "properties": {
+      "constant_baseline_change": {
+       "description": "Whether a constant baseline changed adversely.",
+       "type": "boolean"
+      },
+      "file": {
+       "description": "Normalized repository-relative budgets file path.",
+       "type": "string"
+      },
+      "id": {
+       "description": "Budget id within its file.",
+       "type": "string"
+      },
+      "sigma_change": {
+       "description": "Signed change in sample SD units; absent for changed constant baselines.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "file",
+      "id",
+      "constant_baseline_change"
+     ],
+     "type": "object"
+    },
+    "HistoryEntry": {
+     "additionalProperties": false,
+     "description": "The saved `HistoryEntry` wire contract.",
+     "properties": {
+      "attempt": {
+       "description": "Positive host attempt number; the latest completed attempt wins.",
+       "format": "uint32",
+       "minimum": 1,
+       "type": "integer"
+      },
+      "flags": {
+       "description": "Adverse movements only; improvements create no history flag.",
+       "items": {
+        "$ref": "#/$defs/HistoricalFlag"
+       },
+       "type": "array"
+      },
+      "head_sha": {
+       "description": "Commit measured by this run; never substituted with another head.",
+       "type": "string"
+      },
+      "run_id": {
+       "description": "Host workflow run identity.",
+       "type": "string"
+      },
+      "run_url": {
+       "description": "Host run holding the complete summary and artifacts; links may expire.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "head_sha",
+      "run_id",
+      "run_url",
+      "attempt",
+      "flags"
+     ],
+     "type": "object"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false,
+   "description": "The saved `ReportHistory` wire contract.",
+   "properties": {
+    "entries": {
+     "description": "Compact per-head flags, oldest first.",
+     "items": {
+      "$ref": "#/$defs/HistoryEntry"
+     },
+     "type": "array"
+    },
+    "omitted_heads": {
+     "description": "Number of older heads dropped to fit host capacity.",
+     "format": "uint32",
+     "minimum": 0,
+     "type": "integer"
+    },
+    "schema_version": {
+     "const": 1,
+     "description": "Always `1`.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "schema_version",
+    "entries",
+    "omitted_heads"
+   ],
+   "title": "ReportHistory",
+   "type": "object"
+  },
+  "rolling-history": {
+   "$defs": {
+    "BudgetRun": {
+     "additionalProperties": false,
+     "description": "The saved `BudgetRun` wire contract.",
+     "properties": {
+      "attempt": {
+       "description": "Positive host attempt number; the latest completed attempt wins.",
+       "format": "uint32",
+       "minimum": 1,
+       "type": "integer"
+      },
+      "base_ref": {
+       "description": "Base branch reference used to select the history.",
+       "type": "string"
+      },
+      "catalog": {
+       "description": "Every discovered production budget, including unavailable measurements.",
+       "items": {
+        "$ref": "#/$defs/ListedBudget"
+       },
+       "type": "array"
+      },
+      "completed_at": {
+       "description": "Completion timestamp in RFC 3339.",
+       "format": "date-time",
+       "type": "string"
+      },
+      "enforcement_exclude_labels": {
+       "description": "Saved generic selection: matching catalog labels render as report-only.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "head_sha": {
+       "description": "Commit measured by this run; never substituted with another head.",
+       "type": "string"
+      },
+      "repository": {
+       "description": "Repository identity recorded by the producer.",
+       "type": "string"
+      },
+      "result_notes": {
+       "description": "One short note per catalog row, shown at the end of that row's report status.",
+       "items": {
+        "$ref": "#/$defs/ResultNote"
+       },
+       "type": "array"
+      },
+      "results": {
+       "$ref": "#/$defs/CheckReport",
+       "description": "Unmodified ordinary check results from completed measurements."
+      },
+      "run_id": {
+       "description": "Host workflow run identity.",
+       "type": "string"
+      },
+      "run_url": {
+       "description": "Host run holding the complete summary and artifacts; links may expire.",
+       "type": "string"
+      },
+      "schema_version": {
+       "const": 1,
+       "description": "Always `1`.",
+       "type": "integer"
+      },
+      "unavailable": {
+       "description": "Explicit missing-data reasons; no values are inferred.",
+       "items": {
+        "$ref": "#/$defs/UnavailableBudget"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "schema_version",
+      "repository",
+      "head_sha",
+      "base_ref",
+      "run_id",
+      "run_url",
+      "attempt",
+      "completed_at",
+      "catalog",
+      "results",
+      "unavailable"
+     ],
+     "type": "object"
+    },
+    "CheckReport": {
+     "additionalProperties": false,
+     "description": "What `check` answers with: one result per selected budget, in measurement order.",
+     "properties": {
+      "results": {
+       "description": "One result per selected budget.",
+       "items": {
+        "$ref": "#/$defs/CheckResult"
+       },
+       "type": "array"
+      },
+      "schema_version": {
+       "const": 1,
+       "description": "Always `1`.",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "schema_version",
+      "results"
+     ],
+     "title": "check-report",
+     "type": "object"
+    },
+    "CheckResult": {
+     "additionalProperties": false,
+     "description": "One budget's measurement.",
+     "properties": {
+      "actual": {
+       "description": "The measured value; null on an error.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "detail": {
+       "description": "The `detail` a `reported` command wrote; null when it wrote none.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "The budget's direction."
+      },
+      "ended_at": {
+       "description": "When the measurement ended (RFC 3339), never before `started_at`.",
+       "format": "date-time",
+       "type": "string"
+      },
+      "error": {
+       "description": "Why the measurement failed; null unless `verdict` is `error`.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "file": {
+       "description": "The budgets file's path, as discovered or given.",
+       "type": "string"
+      },
+      "headroom": {
+       "description": "`threshold - actual` under `max`, `actual - threshold` under `min`; negative when\nover, null on an error.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "headroom_percent": {
+       "description": "`headroom / threshold * 100`; null on an error or when the threshold is 0.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "host": {
+       "$ref": "#/$defs/Host",
+       "description": "The host conditions recorded beside this result."
+      },
+      "id": {
+       "description": "The budget's id.",
+       "type": "string"
+      },
+      "labels": {
+       "description": "The budget's labels, empty when it has none.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "started_at": {
+       "description": "When the measurement started (RFC 3339).",
+       "format": "date-time",
+       "type": "string"
+      },
+      "threshold": {
+       "description": "The budget's threshold.",
+       "format": "double",
+       "type": "number"
+      },
+      "unit": {
+       "description": "The budget's unit.",
+       "type": "string"
+      },
+      "verdict": {
+       "$ref": "#/$defs/Verdict",
+       "description": "`within`, `over` or `error`."
+      }
+     },
+     "required": [
+      "actual",
+      "detail",
+      "direction",
+      "ended_at",
+      "error",
+      "file",
+      "headroom",
+      "headroom_percent",
+      "host",
+      "id",
+      "labels",
+      "started_at",
+      "threshold",
+      "unit",
+      "verdict"
+     ],
+     "type": "object"
+    },
+    "Direction": {
+     "description": "Which side of the threshold is within.",
+     "oneOf": [
+      {
+       "const": "max",
+       "description": "Within when `actual <= threshold`.",
+       "type": "string"
+      },
+      {
+       "const": "min",
+       "description": "Within when `actual >= threshold`.",
+       "type": "string"
+      }
+     ]
+    },
+    "Host": {
+     "additionalProperties": false,
+     "description": "The host conditions recorded beside a result.",
+     "properties": {
+      "conditions": {
+       "additionalProperties": {
+        "type": "string"
+       },
+       "description": "Each condition the file declares, and for a `reported` result each condition its\ncommand returned, by name.",
+       "type": "object"
+      },
+      "cpus": {
+       "description": "The CPUs available to this process.",
+       "format": "uint32",
+       "minimum": 0,
+       "type": "integer"
+      },
+      "load1": {
+       "description": "The 1-minute load average; null where unreadable.",
+       "format": "double",
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "mem_available_mib": {
+       "description": "Available memory in MiB; null where unreadable.",
+       "format": "uint64",
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "conditions",
+      "cpus",
+      "load1",
+      "mem_available_mib"
+     ],
+     "type": "object"
+    },
+    "ListedBudget": {
+     "additionalProperties": false,
+     "description": "One budget as `list` reports it: every field the file gives, plus the file.",
+     "properties": {
+      "command": {
+       "description": "The argv that measures it.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "description": {
+       "description": "The budget's description; null when it has none.",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "direction": {
+       "$ref": "#/$defs/Direction",
+       "description": "The budget's direction."
+      },
+      "file": {
+       "description": "The budgets file's path, as discovered or given.",
+       "type": "string"
+      },
+      "id": {
+       "description": "The budget's id.",
+       "type": "string"
+      },
+      "labels": {
+       "description": "The budget's labels, empty when it has none.",
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "measure": {
+       "$ref": "#/$defs/Measure",
+       "description": "How the value is measured."
+      },
+      "threshold": {
+       "description": "The budget's threshold.",
+       "format": "double",
+       "type": "number"
+      },
+      "timeout_seconds": {
+       "description": "The budget's timeout; null when it has none.",
+       "format": "uint64",
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "unit": {
+       "description": "The budget's unit.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description",
+      "direction",
+      "file",
+      "id",
+      "labels",
+      "measure",
+      "threshold",
+      "timeout_seconds",
+      "unit"
+     ],
+     "type": "object"
+    },
+    "Measure": {
+     "description": "How a budget's value is measured.",
+     "oneOf": [
+      {
+       "const": "elapsed",
+       "description": "The command's wall clock, in seconds; a non-zero exit is an error.",
+       "type": "string"
+      },
+      {
+       "const": "reported",
+       "description": "The value the command writes to the file `ONEBUDGETSPEC_RESULT` names.",
+       "type": "string"
+      }
+     ]
+    },
+    "ResultNote": {
+     "additionalProperties": false,
+     "description": "The saved `ResultNote` wire contract.",
+     "properties": {
+      "file": {
+       "description": "Normalized repository-relative budgets file path.",
+       "type": "string"
+      },
+      "id": {
+       "description": "Budget id within its file.",
+       "type": "string"
+      },
+      "note": {
+       "description": "The text the report appends to this row's status.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "file",
+      "id",
+      "note"
+     ],
+     "type": "object"
+    },
+    "UnavailableBudget": {
+     "additionalProperties": false,
+     "description": "The saved `UnavailableBudget` wire contract.",
+     "properties": {
+      "file": {
+       "description": "Normalized repository-relative budgets file path.",
+       "type": "string"
+      },
+      "id": {
+       "description": "Budget id within its file.",
+       "type": "string"
+      },
+      "reason": {
+       "description": "Why the command could not supply an ordinary result.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "file",
+      "id",
+      "reason"
+     ],
+     "type": "object"
+    },
+    "Verdict": {
+     "description": "A result's verdict.",
+     "oneOf": [
+      {
+       "const": "within",
+       "description": "The actual value is on the budget's side of the threshold.",
+       "type": "string"
+      },
+      {
+       "const": "over",
+       "description": "The actual value is past the threshold.",
+       "type": "string"
+      },
+      {
+       "const": "error",
+       "description": "No value was measured; `error` says why.",
+       "type": "string"
+      }
+     ]
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false,
+   "description": "The saved `RollingHistory` wire contract.",
+   "properties": {
+    "base_ref": {
+     "description": "Base branch reference used to select the history.",
+     "type": "string"
+    },
+    "repository": {
+     "description": "Repository identity recorded by the producer.",
+     "type": "string"
+    },
+    "runs": {
+     "description": "At most 20 unique base commits, each with its latest completed attempt.",
+     "items": {
+      "$ref": "#/$defs/BudgetRun"
+     },
+     "maxItems": 20,
+     "type": "array"
+    },
+    "schema_version": {
+     "const": 1,
+     "description": "Always `1`.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "schema_version",
+    "repository",
+    "base_ref",
+    "runs"
+   ],
+   "title": "RollingHistory",
+   "type": "object"
+  }
+ },
+ "version": 3
+}
